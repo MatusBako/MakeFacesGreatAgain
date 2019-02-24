@@ -1,0 +1,6 @@
+numpy
+PIL
+pytorch
+torchvision
+cv2
+dlib
