@@ -21,7 +21,7 @@ class Generator(nn.Module):
         self.upsample = nn.Sequential(*upsample)
         self.end = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.Conv2d(64, 1, kernel_size=3, padding=1)
+            nn.Conv2d(128, 3, kernel_size=3, padding=1)
         )
 
     def forward(self, x):
@@ -40,35 +40,35 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         self.net = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
 
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(512, 1024, kernel_size=1),
-            nn.LeakyReLU(0.2),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Conv2d(1024, 1, kernel_size=1)
         )
 
@@ -86,6 +86,7 @@ class ResResDenseBlock(nn.Module):
                     nn.LeakyReLU()
                     ) if i != 5 else nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1)
                     for i in range(1, 6)]
+        self.convs = nn.Sequential(*self.convs)
         self.scale = ScaleLayer()
 
     def forward(self, x):
@@ -95,7 +96,7 @@ class ResResDenseBlock(nn.Module):
         for conv in self.convs:
             last = conv(inputs)
             inputs = cat((inputs, last), dim=1)
-        return add(x, self.scale * last)
+        return add(x, self.scale(last))
 
 
 class ScaleLayer(nn.Module):
@@ -122,7 +123,7 @@ class UpsampleBLock(nn.Module):
 
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, cnn, feature_layer=9):
+    def __init__(self, cnn, feature_layer=29):
         super(FeatureExtractor, self).__init__()
         self.features = nn.Sequential(*list(cnn.features.children())[:(feature_layer+1)])
 

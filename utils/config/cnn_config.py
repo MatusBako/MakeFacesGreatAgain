@@ -5,19 +5,11 @@ from sys import stderr, exc_info
 from time import time
 from torch import device
 
-class ConfigWrapper:
-    def __init__(self, config_path):
-        try:
-            config = ConfigParser()
-            config.read(config_path)
-        except Exception:
-            print('Can\'t read config file!', file=stderr)
-            ex_type, ex_inst, ex_tb = exc_info()
-            raise ex_type.with_traceback(ex_inst, ex_tb)
 
+class CnnConfig:
+    def __init__(self, config: ConfigParser):
         self._config = config
-
-        config = config['Config']
+        config = config['CNN']
 
         self.train_data = config['TrainData']
         self.test_data = config['TestData']
@@ -31,7 +23,7 @@ class ConfigWrapper:
         self.identityNN = config['IdentityNN']
         self.shape_predictor = config['ShapePredictor']
 
-        if "snapshot" in config.keys():
+        if "Snapshot" in config.keys():
             self.snapshot = config['Snapshot']
         else:
             self.snapshot = None

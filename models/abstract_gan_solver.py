@@ -13,13 +13,14 @@ from torch.nn.functional import interpolate
 from torchvision.transforms import Compose, ToTensor
 from torch.utils.data import DataLoader
 
-from utils import Drawer, Logger, ConfigWrapper
+from utils import Drawer, Logger
+from utils.config import GanConfig
 
 from abc import ABC, abstractmethod
 
 
 class AbstractGanSolver:
-    def __init__(self, cfg: ConfigWrapper = None):
+    def __init__(self, cfg: GanConfig = None):
         self.iteration = 0
 
         self.generator = None
@@ -46,10 +47,11 @@ class AbstractGanSolver:
             self._cfg = cfg
             self.batch_size = cfg.batch_size
             self.upscale_factor = cfg.scale_factor
+            self.generator_name = cfg.generator_module
 
             # TODO: separate generator and disc. LR in config
-            self.learning_rate_disc = cfg.learning_rate
-            self.learning_rate_gen = cfg.learning_rate
+            self.learning_rate_disc = cfg.discriminator_learning_rate
+            self.learning_rate_gen = cfg.generator_learning_rate
 
             self.iter_limit = cfg.iter_limit
             self.iter_per_snapshot = cfg.iter_per_snapshot
@@ -70,7 +72,7 @@ class AbstractGanSolver:
 
     @property
     @abstractmethod
-    def name(self):
+    def discriminator_name(self):
         pass
 
     @abstractmethod
@@ -103,19 +105,19 @@ class AbstractGanSolver:
         #                                                      patience=200, factor=0.5)
         return optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20000, 40000, 60000, 80000], gamma=0.2)
 
-    def build_models(self, cfg: ConfigWrapper):
-        self.discriminator = self.get_discriminator_instance(cfg.scale_factor).to(self.device)
-        self.optimizer_disc = optim.Adam(self.discriminator.parameters(), lr=self.learning_rate_disc)
+    def build_models(self):
+        self.discriminator = self.get_discriminator_instance(self.upscale_factor).to(self.device)
+        self.optimizer_disc = optim.SGD(self.discriminator.parameters(), lr=self.learning_rate_disc)
         self.scheduler_disc = self.create_discriminator_scheduler(self.optimizer_disc)
 
-        self.generator = self.get_generator_instance(cfg.scale_factor).to(self.device)
+        self.generator = self.get_generator_instance(self.upscale_factor).to(self.device)
         self.optimizer_gen = optim.Adam(self.generator.parameters(), lr=self.learning_rate_gen)
         self.scheduler_gen = self.create_generator_scheduler(self.optimizer_gen)
 
     def save_discriminator_model(self):
-        path = self.output_folder + "/" + self.name + "-disc-" + str(self.iteration) + ".mdl"
+        path = self.output_folder + "/" + self.discriminator_name + "-disc-" + str(self.iteration) + ".mdl"
         dic = {
-            'model_name': self.name,
+            'model_name': self.discriminator_name,
             'upscale': self.upscale_factor,
             'iteration': self.iteration,
             'model': self.discriminator.state_dict(),
@@ -127,9 +129,9 @@ class AbstractGanSolver:
         self.discriminator.to(self.device)
 
     def save_generator_model(self):
-        path = self.output_folder + "/" + self.name + "-gen-" + str(self.iteration) + ".mdl"
+        path = self.output_folder + "/" + self.discriminator_name + "-gen-" + str(self.iteration) + ".mdl"
         dic = {
-            'model_name': self.name,
+            'model_name': self.generator_name,
             'upscale': self.upscale_factor,
             'iteration': self.iteration,
             'model': self.generator.state_dict(),
@@ -147,7 +149,7 @@ class AbstractGanSolver:
     def load_discriminator_model(self, path: str):
         state = load(path)
 
-        if state['model_name'] != self.name:
+        if state['model_name'] != self.discriminator_name:
             raise Exception("This snapshot is for model " + state['model_name'] + "!")
 
         self.iteration = state['iteration']
@@ -155,9 +157,9 @@ class AbstractGanSolver:
 
         self.discriminator = self.get_discriminator_instance(self.upscale_factor).to(self.device)
 
-        self.discriminator.load_state_dict(state['disc'])
+        self.discriminator.load_state_dict(state['model'])
 
-        self.optimizer_disc = optim.Adam(self.discriminator.parameters())
+        self.optimizer_disc = optim.Adam(self.discriminator.parameters(), lr=self.learning_rate_disc)
         self.scheduler_disc = self.create_discriminator_scheduler(self.optimizer_disc)
 
         self.optimizer_disc.load_state_dict(state['optimizer'])
@@ -166,7 +168,7 @@ class AbstractGanSolver:
     def load_generator_model(self, path: str):
         state = load(path)
 
-        if state['model_name'] != self.name:
+        if state['model_name'] != self.generator_name:
             # raise Exception("This snapshot is for model " + state['model_name'] + "!")
             print("Using generator from model " + state['model_name'], file=stderr)
 
@@ -175,10 +177,9 @@ class AbstractGanSolver:
 
         self.generator = self.get_generator_instance(self.upscale_factor).to(self.device)
 
-        self.generator.load_state_dict(state['gen'])
-        self.discriminator.load_state_dict(state['disc'])
+        self.generator.load_state_dict(state['model'])
 
-        self.optimizer_gen = optim.Adam(self.generator.parameters())
+        self.optimizer_gen = optim.Adam(self.generator.parameters(), lr=self.learning_rate_gen)
         self.scheduler_gen = self.create_generator_scheduler(self.optimizer_gen)
 
         self.optimizer_gen.load_state_dict(state['optimizer'])
@@ -188,11 +189,12 @@ class AbstractGanSolver:
         assert self._cfg is not None, "Create solver with config to train!"
 
         # save model description
-        for file, attr in (('/arch_gen.txt', self.generator),
-                           ('/arch_disc.txt', self.discriminator)):
+        for file, attr, loss in (('/arch_gen.txt', self.generator, self.compute_generator_loss),
+                                 ('/arch_disc.txt', self.discriminator, self.compute_discriminator_loss)):
             with open(self.output_folder + file, 'w') as f:
-                f.write(str(attr) + "\n\n")
-                f.write(getsource(attr.forward))
+                f.write(str(attr) + '\n\n')
+                f.write(getsource(attr.forward) + '\n\n')
+                f.write(getsource(loss))
 
         self._cfg.save(self.output_folder)
 
@@ -231,7 +233,7 @@ class AbstractGanSolver:
                 # ######## Train generator #########
                 self.generator.zero_grad()
 
-                generator_train_loss = self.compute_generator_loss(response, sr_img, target)
+                generator_train_loss, log_losses = self.compute_generator_loss(response, sr_img, target)
                 generator_train_loss_value = generator_train_loss.item()
 
                 generator_train_loss.backward()
@@ -253,18 +255,22 @@ class AbstractGanSolver:
 
                     # TODO: refactor
                     # do we even need PSNR?
-                    generator_test_loss_value, discriminator_test_loss_value, psnr, psnr_diff, identity_distance = self.evaluate(
-                        test_set)
+                    (generator_test_loss_value, discriminator_test_loss_value), \
+                    (psnr, psnr_diff), (distance_mean, distance_var) = self.evaluate(test_set)
 
                     if self.logger:
-                        line = " ".join([f"Iter: {self.iteration}",
-                                         f"Gen_Train_loss: {round(generator_train_loss_value, 5)}",
-                                         f"Disc_Train_loss: {round(discriminator_train_loss_value, 5)}",
-                                         f"Gen_Test_loss: {round(generator_test_loss_value, 5)}",
-                                         f"Disc_Test_loss: {round(discriminator_test_loss_value, 5)}",
-                                         f"PSNR: {round(psnr, 5)}",
-                                         f"PSNR_diff: {round(psnr_diff, 5)}"
-                                         f"Identity_dist: {round(identity_distance, 5)}"
+                        line = " ".join([f"Iter: {self.iteration:}",
+                                         f"Gen_Train_loss: {round(generator_train_loss_value, 5):.5f}",
+                                         f"Disc_Train_loss: {round(discriminator_train_loss_value, 5):.5f}",
+                                         f"Gen_Test_loss: {round(generator_test_loss_value, 5):.5f}",
+                                         f"Disc_Test_loss: {round(discriminator_test_loss_value, 5):.5f}",
+                                         f"PSNR: {round(psnr, 3):.3f}",
+                                         f"PSNR_diff: {round(psnr_diff, 3):.3f}",
+                                         f"Identity_dist_mean: {round(distance_mean, 5):.5f}",
+                                         f"Identity_dist_var: {round(distance_var, 5):.5f}",
+                                         f"PixelLoss: {round(log_losses[0], 6):.6f}",
+                                         f"AdvLoss: {round(log_losses[1], 6):.6f}",
+                                         f"FeatureLoss: {round(log_losses[2], 6):.6f}",
                                          ])
                         self.logger.log(line)
 
@@ -315,12 +321,12 @@ class AbstractGanSolver:
         generator_loss_value = 0.
         discriminator_loss_value = 0.
         identity_dist = 0.
+        identity_dists = []
 
         iterations = 0
 
         # self.net.eval()
 
-        # TODO: verify evaluation
         with no_grad():
             for batch_num, (data, target) in enumerate(test_set):
                 data, target = data.to(self.device), target.to(self.device)
@@ -334,7 +340,8 @@ class AbstractGanSolver:
                 # ##### Test generator #####
                 mse = self.mse(result, target).item()
                 net_psnr += 10 * log10(1 / mse)
-                generator_loss_value += self.compute_generator_loss(response, result, target).item()
+                tmp, _ = self.compute_generator_loss(response, result, target)
+                generator_loss_value += tmp.item()
 
                 resized_data = interpolate(data, scale_factor=self.upscale_factor)
                 interpolation_loss += self.mse(resized_data, target).item()
@@ -343,30 +350,31 @@ class AbstractGanSolver:
                 resized_data = resized_data.cpu().numpy()
                 result = result.cpu().numpy()
                 target = target.cpu().numpy()
-                #result = (result.cpu().numpy() * 256).astype(np.uint8)[:, :, :, ::-1]
-                #target = (target.cpu().numpy() * 256).astype(np.uint8)[:, :, :, ::-1]
+                # result = (result.cpu().numpy() * 256).astype(np.uint8)[:, :, :, ::-1]
+                # target = (target.cpu().numpy() * 256).astype(np.uint8)[:, :, :, ::-1]
 
                 # security through obscurity
                 # TODO: refactor
                 for res_img, tar_img in zip(np.transpose((result * 256).astype(np.uint8)[:, :, :, ::-1], (0, 2, 3, 1)),
                                             np.transpose((target * 256).astype(np.uint8)[:, :, :, ::-1], (0, 2, 3, 1))):
 
-                    #res_detections = self.face_detector(res_img)
-                    tar_detections = self.face_detector(tar_img)
-                    #dlib.rectangles[[(45, 83) (131, 170)]]
+                    # res_detections = self.face_detector(res_img)
+                    detections = self.face_detector(tar_img)
 
                     # face not detected
-                    if not len(tar_detections):
+                    if not len(detections):
                         continue
 
-                    #res_face_shape = self.face_localizer(res_img, res_detections[0])
-                    tar_face_shape = self.face_localizer(tar_img, tar_detections[0])
+                    # res_face_shape = self.face_localizer(res_img, res_detections[0])
+                    face_shape = self.face_localizer(tar_img, detections[0])
 
-                    result_identity = np.array(self.identityNN.compute_face_descriptor(res_img, tar_face_shape))
-                    target_identity = np.array(self.identityNN.compute_face_descriptor(tar_img, tar_face_shape))
+                    result_identity = np.array(self.identityNN.compute_face_descriptor(res_img, face_shape))
+                    target_identity = np.array(self.identityNN.compute_face_descriptor(tar_img, face_shape))
 
                     identity_dist += np.sum(result_identity ** 2) + np.sum(target_identity ** 2) \
                                      - 2 * np.dot(result_identity, target_identity)
+                    identity_dists.append(np.sum(result_identity ** 2) + np.sum(target_identity ** 2)
+                                          - 2 * np.dot(result_identity, target_identity))
 
                 iterations += 1
                 if self.test_iter is not None and iterations % self.test_iter == 0:
@@ -378,6 +386,7 @@ class AbstractGanSolver:
         generator_loss_value /= iterations
         discriminator_loss_value /= iterations
 
+        identity_dists = np.array(identity_dists)
         identity_dist /= iterations * self.batch_size
 
         if self.drawer is not None and self.iteration % self.iter_per_image == 0:
@@ -388,7 +397,9 @@ class AbstractGanSolver:
             self.drawer.save_images(data, result, target, "Test-" + str(self.iteration))
 
         # self.net.train()
-        return generator_loss_value, discriminator_loss_value, net_psnr, net_psnr - interpolation_psnr, identity_dist
+        return (generator_loss_value, discriminator_loss_value), \
+               (net_psnr, net_psnr - interpolation_psnr), \
+               (identity_dists.mean(), identity_dists.var())
 
     def test(self):
         pass

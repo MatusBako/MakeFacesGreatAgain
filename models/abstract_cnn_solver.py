@@ -14,13 +14,14 @@ from torch.nn.functional import interpolate
 from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop
 from torch.utils.data import DataLoader
 
-from utils import Drawer, Logger, ConfigWrapper
+from utils import Drawer, Logger
+from utils.config import CnnConfig
 
 from abc import ABC, abstractmethod
 
 
 class AbstractCnnSolver:
-    def __init__(self, cfg: ConfigWrapper=None):
+    def __init__(self, cfg: CnnConfig=None):
         self.iteration = 0
         self.learning_rate = None
         self.net = None
@@ -76,8 +77,8 @@ class AbstractCnnSolver:
         #                                                      patience=200, factor=0.5)
         return optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20000, 40000, 60000, 80000], gamma=0.2)
 
-    def build_models(self, cfg: ConfigWrapper):
-        self.net = self.get_net_instance(cfg.scale_factor).to(self.device)
+    def build_models(self):
+        self.net = self.get_net_instance(self.upscale_factor).to(self.device)
         self.optimizer = optim.Adam(self.net.parameters(), lr=self.learning_rate)
         self.scheduler = self.create_scheduler(self.optimizer)
 

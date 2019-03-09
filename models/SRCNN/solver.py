@@ -1,7 +1,7 @@
 from torch.nn import MSELoss
 
 from .model import Net
-from utils import ConfigWrapper
+from utils import CnnConfig
 
 from os.path import dirname, abspath
 from inspect import getframeinfo, currentframe
@@ -19,7 +19,7 @@ except ValueError:
     from abstract_cnn_solver import AbstractCnnSolver
 
 class Solver(AbstractCnnSolver):
-    def __init__(self, cfg: ConfigWrapper = None):
+    def __init__(self, cfg: CnnConfig = None):
         super().__init__(cfg)
         self.device = device("cuda" if cuda.is_available() else "cpu")
         self.loss = MSELoss()
