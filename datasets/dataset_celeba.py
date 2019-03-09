@@ -5,8 +5,10 @@ import numpy as np
 from os import listdir
 from os.path import join
 from PIL import Image
-from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop
+from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop, RandomChoice
 from torchvision.transforms.functional import crop
+
+from .transforms import JpegCompress, AddNoise, MotionBlur, DefocusBlur
 
 
 def open_image(path):
@@ -18,30 +20,12 @@ def get_img_size(path):
     return img.size
 
 
-class JpegCompress:
-    def __call__(self, image):
-        out = BytesIO()
-        quality = 95 - int(np.floor(np.clip(np.random.exponential(scale=3), 0, 20)))
-        image.save(out, format='jpeg', quality=quality)
-        out.seek(0)
-        return Image.open(out)
-
-
-class AddNoise:
-    def __call__(self, image):
-        image = np.array(image, dtype=np.int32)
-
-        noise_range = np.random.randint(1, 3)
-        noise = np.random.normal(0, noise_range, size=image.shape).astype(np.int32)
-        return Image.fromarray(np.clip(image + noise, 0, 255).astype(np.uint8))
-
-
-# TODO: blur
 def build_input_transform(h, w, upscale_factor):
     return Compose([
-        CenterCrop((h, w)),
-        Resize((h // upscale_factor, w // upscale_factor)),#, interpolation=Image.BICUBIC),
-        RandomApply([AddNoise(), JpegCompress()], 0.5),
+        Resize((h // upscale_factor, w // upscale_factor), interpolation=Image.BICUBIC),
+        RandomApply([AddNoise()], 0.3),
+        RandomChoice([RandomApply([MotionBlur()], 0.3), RandomApply([DefocusBlur()], 0.3)]),
+        RandomApply([JpegCompress()], 0.3),
         ToTensor(),
     ])
 
