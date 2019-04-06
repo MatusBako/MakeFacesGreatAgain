@@ -5,6 +5,7 @@ import numpy as np
 from os import listdir
 from typing import Dict, List
 
+from sys import argv
 
 def get_args():
     import argparse
@@ -41,10 +42,8 @@ def transform_lines(lines: Dict[str, List]):
     return lines
 
 
-def make_plot(folder):
-    log = folder + "/log.txt"
-    #    if args.log_path is None else args.log_path
-    lines = {'iter': [], 'train': [], 'test': [], 'psnr': [], 'diff_psnr': []}
+def parse_log(log):
+    lines = {'iter': [], 'train': [], 'test': [], 'psnr': [], 'diff_psnr': [], 'identity_dist': []}
     lr_marks = []
 
     with open(log, 'r') as file:
@@ -60,6 +59,15 @@ def make_plot(folder):
             lines['test'].append(float(fields[2].split(":")[-1]))
             lines['psnr'].append(float(fields[3].split(":")[-1]))
             lines['diff_psnr'].append(float(fields[4].split(":")[-1]))
+            lines['identity_dist'].append(float(fields[5].split(":")[-1]))
+    return lines, lr_marks
+
+
+def make_plot(folder):
+    log = folder + "/log.txt"
+    #    if args.log_path is None else args.log_path
+
+    lines, lr_marks = parse_log(log)
 
     line_width = 1
 
@@ -93,9 +101,15 @@ def make_plot(folder):
 
 def main():
     folders = []
-    for folder in listdir("outputs"):
-        if "plot.png" not in listdir("outputs/" + folder):
-            folders.append("./outputs/" + folder)
+
+    if len(argv) > 1:
+        dir = argv[1]
+    else:
+        dir = "./outputs"
+
+    for folder in listdir(dir):
+        if "plot.png" not in listdir(dir + "/" + folder) and 'gan' not in folder.lower():
+            folders.append(dir + "/" + folder)
 
     for folder in folders:
         make_plot(folder)
