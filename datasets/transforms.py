@@ -1,6 +1,7 @@
 from cv2 import resize, circle, INTER_AREA, LINE_AA
 from io import BytesIO
 import numpy as np
+from numpy.random import RandomState
 from PIL import Image
 from scipy.signal import convolve2d
 from types import LambdaType
@@ -24,49 +25,42 @@ class AddNoise:
         return Image.fromarray(np.clip(image + noise, 0, 255).astype(np.uint8))
 
 
-class Lambda(object):
-    """Apply a user-defined lambda as a transform.
-
-    Args:
-        lambd (function): Lambda/function to be used for transform.
-    """
-
-    def __init__(self, lambd):
-        assert isinstance(lambd, LambdaType)
-        self.lambd = lambd
+class ColorJitter:
+    def __init__(self, rng_seed, brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05):
+        self.rng = RandomState(rng_seed)
+        self.brightness = brightness
+        self.contrast = contrast
+        self.saturation = saturation
+        self.hue = hue
 
     def __call__(self, img):
-        return self.lambd(img)
+        self.color_jitter(img)
 
-    def __repr__(self):
-        return self.__class__.__name__ + '()'
+    # TODO: create color jitter, so that it's possible to get the same deformation twice
+    # all factors must be passed on call
+    def color_jitter(self, img):
+        if self.brightness > 0:
+            brightness_factor = self.rng.uniform(max(0, 1 - self.brightness), 1 + self.brightness)
+            img = F.adjust_brightness(img, brightness_factor)
 
+        if self.contrast > 0:
+            contrast_factor = self.rng.uniform(max(0, 1 - self.contrast), 1 + self.contrast)
+            img = F.adjust_contrast(img, contrast_factor)
 
-# TODO: create color jitter, so that it's possible to get the same deformation twice
-# all factors must be passed on call
-def color_jitter(img, brightness, contrast, saturation, hue):
-    if brightness > 0:
-        brightness_factor = np.random.uniform(max(0, 1 - brightness), 1 + brightness)
-        img = F.adjust_brightness(img, brightness_factor)
+        if self.saturation > 0:
+            saturation_factor = self.rng.uniform(max(0, 1 - self.saturation), 1 + self.saturation)
+            img = F.adjust_saturation(img, saturation_factor)
 
-    if contrast > 0:
-        contrast_factor = np.random.uniform(max(0, 1 - contrast), 1 + contrast)
-        img = F.adjust_contrast(img, contrast_factor)
-
-    if saturation > 0:
-        saturation_factor = np.random.uniform(max(0, 1 - saturation), 1 + saturation)
-        img = F.adjust_saturation(img, saturation_factor)
-
-    if hue > 0:
-        hue_factor = np.random.uniform(-hue, hue)
-        img = F.adjust_hue(img, hue_factor)
-    return img
+        if self.hue > 0:
+            hue_factor = np.random.uniform(-self.hue, self.hue)
+            img = F.adjust_hue(img, hue_factor)
+        return img
 
 
 class MotionBlur:
     def __call__(self, image):
         image = np.array(image)
-        kernel = DefocusBlur.get_kernel(np.random.randint(1, 5), np.random.randint(1, 5))
+        kernel = MotionBlur.get_kernel(resolution=np.random.randint(5, 12))
 
         for c in range(3):
             image[:, :, c] = convolve2d(image[:, :, c], kernel, mode='same', boundary='wrap')
@@ -78,7 +72,7 @@ class MotionBlur:
         supersampling = 5
 
         # generate random acceleration
-        a = np.random.randn(2, length+start_samples)
+        a = np.random.randn(2, length + start_samples)
 
         # integrate speed
         a[0, :] = MotionBlur.ewma(a[0, :], halflife * length)
@@ -94,7 +88,7 @@ class MotionBlur:
         a = a - np.mean(a, axis=1).reshape((2, 1))
 
         # normalize size
-        maxDistance = ((a[0, :]**2 + a[1, :]**2) ** 0.5).max()
+        maxDistance = ((a[0, :] ** 2 + a[1, :] ** 2) ** 0.5).max()
         a = a / maxDistance
 
         psf, t, t = np.histogram2d(a[0, :], a[1, :], bins=resolution * supersampling,
@@ -181,7 +175,7 @@ class MotionBlur:
 class DefocusBlur:
     def __call__(self, image):
         image = np.array(image)
-        kernel = DefocusBlur.get_kernel(np.random.randint(1, 5), np.random.randint(1, 5))
+        kernel = DefocusBlur.get_kernel(np.random.randint(1, 8), np.random.randint(1, 5))
 
         for c in range(3):
             image[:, :, c] = convolve2d(image[:, :, c], kernel, mode='same', boundary='wrap')
@@ -196,5 +190,4 @@ class DefocusBlur:
         circle(psf, (center, center), psf_radius, color=1.0, thickness=-1, lineType=LINE_AA)
         psf = resize(psf, dsize=(0, 0), fx=1.0 / scale, fy=1.0 / scale, interpolation=INTER_AREA)
         psf = psf / np.sum(psf)
-        return psf#, int(center / scale)
-
+        return psf  # , int(center / scale)
