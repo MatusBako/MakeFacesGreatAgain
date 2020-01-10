@@ -1,5 +1,6 @@
 import torch.utils.data as data
 
+from copy import deepcopy
 from io import BytesIO
 import numpy as np
 from os import listdir
@@ -10,9 +11,15 @@ from torchvision.transforms.functional import crop
 
 from .transforms import JpegCompress, AddNoise, MotionBlur, DefocusBlur
 
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 def open_image(path):
-    return Image.open(path)
+    img = Image.open(path)
+    ret = img.copy()
+    img.close()
+    return ret
 
 
 def get_img_size(path):
@@ -20,12 +27,12 @@ def get_img_size(path):
     return img.size
 
 
-def build_input_transform(h, w, upscale_factor):
+def build_input_transform(h, w, upscale_factor: int):
     return Compose([
-        Resize((h // upscale_factor, w // upscale_factor), interpolation=Image.BICUBIC),
         RandomApply([AddNoise()], 0.3),
         RandomChoice([RandomApply([MotionBlur()], 0.3), RandomApply([DefocusBlur()], 0.3)]),
         RandomApply([JpegCompress()], 0.3),
+        Resize((h // upscale_factor, w // upscale_factor), interpolation=Image.BICUBIC),
         ToTensor(),
     ])
 
@@ -36,16 +43,15 @@ def build_target_transform():
     ])
 
 
-# TODO: possibly add producer-consumner (multiprocessing) to use less RAM
 class DatasetFFHQ(data.Dataset):
-    def __init__(self, image_dir, upscale_factor=2, input_transform=None, target_transform=None, length=None):
+    def __init__(self, image_dir, upscale_factor: int = 2, input_transform=None, target_transform=None, length=None):
         super().__init__()
-        self.image_filenames = [join(image_dir, x) for x in listdir(image_dir)]
+        self.image_filenames = [join(image_dir, x) for x in sorted(listdir(image_dir))]
 
         self.length = length if length and length <= len(self.image_filenames) else len(self.image_filenames)
 
         # load images to memory
-        self.images = [Image.open(path) for path in self.image_filenames]
+        self.images = [open_image(path) for path in self.image_filenames[:self.length]]
 
         self.w, self.h = get_img_size(self.image_filenames[0])
 

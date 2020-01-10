@@ -7,6 +7,7 @@ from scipy.signal import convolve2d
 from types import LambdaType
 from torchvision.transforms import functional as F, Compose
 
+
 class JpegCompress:
     def __call__(self, image):
         out = BytesIO()
@@ -36,7 +37,7 @@ class ColorJitter:
     def __call__(self, img):
         self.color_jitter(img)
 
-    # TODO: create color jitter, so that it's possible to get the same deformation twice
+    # TODO: create color jitter, so that it's possible to get the same deformation twice (use seed for rng)
     # all factors must be passed on call
     def color_jitter(self, img):
         if self.brightness > 0:
