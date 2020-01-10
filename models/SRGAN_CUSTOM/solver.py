@@ -1,9 +1,10 @@
+from configparser import SectionProxy
 from inspect import getframeinfo, currentframe
 from os.path import dirname, abspath
 from sys import path
 
 from torch import ones, zeros, mean, tensor, cat, log, clamp, sigmoid
-from torch.nn import MSELoss, BCELoss
+from torch.nn import MSELoss, BCELoss, Module
 
 from torchvision.transforms import Normalize
 
@@ -23,16 +24,13 @@ class Solver(AbstractGanSolver):
     def __init__(self, cfg=None):
         super().__init__(cfg)
 
-        nn_config = cfg['GAN']
+        nn_config: SectionProxy = cfg['GAN']
         self.device = nn_config['Device']
 
         self.mse = MSELoss().to(nn_config['Device'])
         #self.bce = BCELoss().to(nn_config['Device'])
 
-        self.feature_extractor = FeatureExtractor().to(nn_config['Device'])
-
-        self.mean = tensor([0.485, 0.456, 0.406]).view((1, 3, 1, 1)).to(nn_config['Device'])
-        self.std = tensor([0.229, 0.224, 0.225]).view((1, 3, 1, 1)).to(nn_config['Device'])
+        self.feature_extractor: Module = FeatureExtractor().to(nn_config['Device'])
         self.normalizer = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
         self.ones_const = ones(self.batch_size, device=nn_config['Device'])
@@ -40,11 +38,12 @@ class Solver(AbstractGanSolver):
         self.d_loss_response = cat((ones(self.batch_size, device=nn_config['Device']),
                                     zeros(self.batch_size, device=nn_config['Device'])))
 
+
         self.eps = 1e-8
 
     @property
     def discriminator_name(self):
-        return "SRGAN"
+        return "SRGAN_CUSTOM"
 
     def build_generator(self, *args, **kwargs) -> Generator:
         return Generator(*args, **kwargs)
@@ -60,19 +59,19 @@ class Solver(AbstractGanSolver):
     def compute_generator_loss(self, response: tensor, fake_img: tensor, real_img: tensor, *args, **kwargs):
         real_response, fake_response = sigmoid(response).split(response.size(0) // 2)
 
-        # pixel loss not used in this paper
-        # pixel_loss = self.mse(fake_img, real_img)
+        # not used
+        #gen_pixel_loss = self.mse(fake_img, real_img)
 
-        # can BCE be used like this?
+        # can be BCE used like this?
         #gen_adv_loss = self.bce(fake_response, self.ones_const)
         gen_adv_loss = mean(-log(fake_response + self.eps))
 
+        # security through obscurity
         fake_features, real_features = self.feature_extractor(cat((fake_img, real_img), 0)).split(real_response.size(0))
 
-        #feature_content_loss = self.mse(real_features, fake_features)
-        feature_content_loss = self.mse(real_features, fake_features)
+        gen_content_loss = self.mse(real_features, fake_features)
 
         #TODO: koeficienty
-        # 0.0000000001 * feature_content_loss, \
-        return 0.01 * gen_adv_loss + 0.0001 * feature_content_loss, \
-            [0, 0.01 * gen_adv_loss.item(), 0.0001 * feature_content_loss.item()]  # 0.0000000001 * feature_content_loss.item()]
+        # 0.0000000001 * feature_content_loss,
+        return 0.01 * gen_adv_loss + 0.001 * gen_content_loss, \
+            [0, 0.01 * gen_adv_loss.item(), 0.001 * gen_content_loss.item()]  # 0.0000000001 * feature_content_loss.item()]

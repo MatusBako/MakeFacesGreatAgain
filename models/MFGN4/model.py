@@ -31,7 +31,7 @@ class ResidualBlock(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self, upscale_factor, num_channels=3):
+    def __init__(self, upscale_factor: int, num_channels=3):
         super(Net, self).__init__()
         self.upscale_factor = upscale_factor
 

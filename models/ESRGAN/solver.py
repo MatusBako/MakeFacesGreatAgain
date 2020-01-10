@@ -1,15 +1,15 @@
+from configparser import SectionProxy
 from inspect import getframeinfo, currentframe
 from os.path import dirname, abspath
 from sys import path
 
 from torch import ones, zeros, mean, tensor, cat, sigmoid, log
-from torch.nn import MSELoss, L1Loss
+from torch.nn import MSELoss, L1Loss, BCELoss
 
 from torchvision.models import vgg19
 
-from .model import Discriminator, FeatureExtractor
-from utils.config import GanConfig
-Generator = None
+from .model import Discriminator, FeatureExtractor, Generator
+# Generator = None
 
 try:
     from ..abstract_gan_solver import AbstractGanSolver
@@ -22,69 +22,75 @@ except ValueError:
 
 
 class Solver(AbstractGanSolver):
-    def __init__(self, cfg: GanConfig = None, batch_size=8):
+    def __init__(self, cfg=None, batch_size=8):
         super().__init__(cfg)
 
-        self.device = 'cpu' if cfg is None else cfg.device
-        self.batch_size = batch_size if cfg is None else cfg.batch_size
+        nn_config: SectionProxy = cfg['GAN']
+        self.device = nn_config['Device']
 
-        # need to import Generator dynamically
-        if cfg.generator_module != cfg.discriminator_module:
-            global Generator
-            try:
-                Generator = __import__("models." + cfg.generator_module, fromlist=['Generator']).Generator
-            except AttributeError:
-                Generator = __import__("models." + cfg.generator_module, fromlist=['Net']).Net
+
+        # TODO: use this as dynamic gen. import (if so, define Gen on global level)
+        # model = nn_config['Generator'] if cfg is not None else self.discriminator_name
+        #
+        # # need to import Generator dynamically
+        # global Generator
+        # try:
+        #     Generator = __import__("models." + model, fromlist=['Generator']).Generator
+        # except AttributeError:
+        #     Generator = __import__("models." + model, fromlist=['Net']).Net
 
         self.mse = MSELoss().to(self.device)
         self.l1 = L1Loss().to(self.device)
 
-        self.feature_extractor = FeatureExtractor(vgg19(pretrained=True)).to(self.device)
-        self.mean = [0.485, 0.456, 0.406]
-        self.std = [0.229, 0.224, 0.225]
+        self.feature_extractor = FeatureExtractor().to(nn_config['Device'])
         # self.normalizer = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-        self.ones_const = ones(self.batch_size, device=self.device)
-        self.zeros_const = zeros(self.batch_size, device=self.device)
-        self.d_loss_response = cat((ones(self.batch_size, device=self.device),
-                                    zeros(self.batch_size, device=self.device)))
+        self.ones_const = ones(self.batch_size, device=nn_config['Device'])
+        self.zeros_const = zeros(self.batch_size, device=nn_config['Device'])
+        self.d_loss_response = cat((ones(self.batch_size, device=nn_config['Device']),
+                                    zeros(self.batch_size, device=nn_config['Device'])))
 
-        self.epsilon = 0.000001
+        # TODO: make readable from config
+        self.alpha = 5e-3
+        self.eta = 1e-2
+        self.eps = 1e-8
 
     @property
     def discriminator_name(self):
         return "ESRGAN"
 
-    def get_generator_instance(self, *args, **kwargs):
+    def build_generator(self, *args, **kwargs):
         return Generator(*args, **kwargs)
 
-    def get_discriminator_instance(self, *args, **kwargs):
+    def build_discriminator(self, *args, **kwargs):
         return Discriminator()
+
+    def _relative_loss(self, real: tensor, fake: tensor):
+        return sigmoid(real - mean(fake))
 
     def compute_discriminator_loss(self, response: tensor, *args, **kwargs):
         real_response, fake_response = response.split(len(response) // 2)
 
-        return - mean(log(sigmoid(real_response - mean(fake_response, 0) + self.epsilon)), 0) \
-            - mean(log(1 - sigmoid(fake_response - mean(real_response, 0) + self.epsilon)), 0)
+        #return - mean(log(sigmoid(real_response - mean(fake_response, 0) + self.epsilon)), 0) \
+        #    - mean(log(1 - sigmoid(fake_response - mean(real_response, 0) + self.epsilon)), 0)
+        return - mean(log(self._relative_loss(real_response, fake_response) + self.eps)) \
+            - mean(log(1 - self._relative_loss(fake_response, real_response) + self.eps))
 
     def compute_generator_loss(self, response: tensor, fake_img: tensor, real_img: tensor, *args, **kwargs):
         real_response, fake_response = response.split(len(response) // 2)
 
-        gen_adv_loss = - mean(log(sigmoid(fake_response - mean(real_response, 0)) + self.epsilon), 0) \
-            - mean(log(1 - sigmoid(real_response - mean(fake_response, 0)) + self.epsilon), 0)
-        gen_content_loss = self.l1(fake_img, real_img)
+        pixel_loss = self.l1(fake_img, real_img)
 
-        #fake_img_n = tensor(fake_img, requires_grad=False)
-        #real_img_n = tensor(real_img, requires_grad=False)
+        #gen_adv_loss = - mean(log(fake_response - mean(real_response, 0) + self.epsilon), 0) \
+        #    - mean(log(1 - real_response - mean(fake_response, 0) + self.epsilon), 0)
+        gen_adv_loss = - mean(log(self._relative_loss(real_response, fake_response) + self.eps)) \
+            - mean(log(1 - self._relative_loss(fake_response, real_response) + self.eps))
 
-        #for c in range(3):
-        #    fake_img_n[:, c, :, :] = (fake_img_n[:, c, :, :] - self.mean[c]) / self.std[c]
-        #    real_img_n[:, c, :, :] = (real_img_n[:, c, :, :] - self.mean[c]) / self.std[c]
+        fake_features, real_features = self.feature_extractor(cat((fake_img, real_img), 0)).split(real_response.size(0))
 
-        #fake_features = self.feature_extractor(fake_img_n)
-        #real_features = self.feature_extractor(real_img_n)
         #feature_content_loss = self.mse(real_features, fake_features)
+        feature_loss = self.mse(real_features, fake_features)
 
-        # + 0.000000001 * feature_content_loss, \
-        return 0.001 * gen_content_loss + 0.0001 * gen_adv_loss, \
-            [0.001 * gen_content_loss.item(), 0.0001 * gen_adv_loss.item(), 0]  # 0.000000001 * feature_content_loss.item()]
+        # TODO: add parameters to config
+        return 1e-2 * pixel_loss + 5e-3 * gen_adv_loss + feature_loss, \
+            [1e-2 * pixel_loss.item(), 5e-3 * gen_adv_loss.item(), feature_loss]  # 0.000000001 * feature_content_loss.item()]
