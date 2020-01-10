@@ -1,26 +1,43 @@
 import dlib
-from inspect import getsource
 import numpy as np
+
+from configparser import SectionProxy, ConfigParser
+from datetime import datetime
+from inspect import getsource, getframeinfo, currentframe
 from numpy import log10
+from os import mkdir
+from os.path import dirname, abspath
 from PIL import Image
-from sys import exc_info, stderr
-from typing import Tuple
+from sys import exc_info, stderr, path
+from time import time
+from tqdm import tqdm
+from typing import Tuple, Optional
 
 from torch import load, save, no_grad, device, optim, cuda, cat, tensor
 from torch.autograd import Variable
-from torch.nn import MSELoss
+from torch.nn import MSELoss, Module
 from torch.nn.functional import interpolate
-from torchvision.transforms import Compose, ToTensor
+from torchvision.transforms import Compose, ToTensor, CenterCrop, Resize
 from torch.utils.data import DataLoader
 
-from utils import Drawer, Logger
-from utils.config import GanConfig
+from factory import build_optimizer, build_scheduler, build_feature_extractor
+
+try:
+    from utils import Drawer, Logger
+    from utils.config import CnnConfig
+except ModuleNotFoundError:
+    script = getframeinfo(currentframe()).filename
+    root_dir = dirname((abspath(script)))
+    path.append(root_dir)
+    from utils import Drawer, Logger
+    from utils.config import CnnConfig
+
 
 from abc import ABC, abstractmethod
 
 
 class AbstractGanSolver:
-    def __init__(self, cfg: GanConfig = None):
+    def __init__(self, config: Optional[ConfigParser] = None):
         self.iteration = 0
 
         self.generator = None
@@ -40,33 +57,32 @@ class AbstractGanSolver:
         self.test_iter = None
         self.upscale_factor = None
 
-        # TODO: get cuda device from config
         self.device = device("cuda" if cuda.is_available() else "cpu")
 
-        if cfg is not None:
-            self._cfg = cfg
-            self.batch_size = cfg.batch_size
-            self.upscale_factor = cfg.scale_factor
-            self.generator_name = cfg.generator_module
+        if config is not None:
+            self._cfg = config
+            nn_cfg: SectionProxy = config["GAN"]
 
-            # TODO: separate generator and disc. LR in config
-            self.learning_rate_disc = cfg.discriminator_learning_rate
-            self.learning_rate_gen = cfg.generator_learning_rate
+            self.device = device(nn_cfg['Device'])
+            self.batch_size = nn_cfg.getint('BatchSize')
+            self.upscale_factor = nn_cfg.getint('UpscaleFactor')
+            self.generator_name = nn_cfg['Generator']
 
-            self.iter_limit = cfg.iter_limit
-            self.iter_per_snapshot = cfg.iter_per_snapshot
-            self.iter_per_image = cfg.iter_per_image
-            self.iter_to_eval = cfg.iter_per_eval
-            self.test_iter = cfg.test_iter
+            self.learning_rate_disc = nn_cfg.getfloat('DiscriminatorLearningRate')
+            self.learning_rate_gen = nn_cfg.getfloat('GeneratorLearningRate')
 
-            self.output_folder = cfg.output_folder
+            self.iter_limit = nn_cfg.getint('IterationLimit')
+            self.iter_per_snapshot = nn_cfg.getint('IterationsPerSnapshot')
+            self.iter_per_image = nn_cfg.getint('IterationsPerImage')
+            self.iter_to_eval = nn_cfg.getint('IterationsToEvaluation')
+            self.test_iter = nn_cfg.getint('EvaluationIterations')
 
-            self.face_detector = dlib.get_frontal_face_detector()
-            self.face_localizer = dlib.shape_predictor(cfg.shape_predictor)
-            self.identityNN = dlib.face_recognition_model_v1(cfg.identityNN)
+            timestamp = str(datetime.fromtimestamp(time()).strftime('%Y.%m.%d-%H:%M:%S'))
+            self.output_folder = nn_cfg['OutputFolder'] + "/" + self.discriminator_name + "-" + timestamp
+
+            self.identity_extractor = build_feature_extractor(config['FeatureExtractor'])
 
         self.mse = MSELoss()
-
         # torch.manual_seed(self.seed)
         # torch.cuda.manual_seed(self.seed)
 
@@ -76,11 +92,11 @@ class AbstractGanSolver:
         pass
 
     @abstractmethod
-    def get_discriminator_instance(self, *args, **kwargs):
+    def build_discriminator(self, *args, **kwargs):
         pass
 
     @abstractmethod
-    def get_generator_instance(self, *args, **kwargs):
+    def build_generator(self, *args, **kwargs):
         pass
 
     @abstractmethod
@@ -91,31 +107,23 @@ class AbstractGanSolver:
     def compute_generator_loss(self, fake_response, fake_img, real_img, *args, **kwargs):
         pass
 
-    @staticmethod
-    def create_generator_scheduler(optimizer):
-        # self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
-        # self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, cooldown=5000,
-        #                                                      patience=200, factor=0.5)
-        return optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20000, 40000, 60000, 80000], gamma=0.2)
-
-    @staticmethod
-    def create_discriminator_scheduler(optimizer):
-        # self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
-        # self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, cooldown=5000,
-        #                                                      patience=200, factor=0.5)
-        return optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20000, 40000, 60000, 80000], gamma=0.2)
-
     def build_models(self):
-        self.discriminator = self.get_discriminator_instance(self.upscale_factor).to(self.device)
-        self.optimizer_disc = optim.SGD(self.discriminator.parameters(), lr=self.learning_rate_disc)
-        self.scheduler_disc = self.create_discriminator_scheduler(self.optimizer_disc)
+        self.discriminator: Module = self.build_discriminator(self.upscale_factor).to(self.device)
 
-        self.generator = self.get_generator_instance(self.upscale_factor).to(self.device)
-        self.optimizer_gen = optim.Adam(self.generator.parameters(), lr=self.learning_rate_gen)
-        self.scheduler_gen = self.create_generator_scheduler(self.optimizer_gen)
+        self.optimizer_disc = build_optimizer(self._cfg['DiscOptimizer'],
+                                              self.discriminator.parameters(),
+                                              self.learning_rate_disc)
+        self.scheduler_disc = build_scheduler(self._cfg['DiscScheduler'], self.optimizer_disc)
+
+        self.generator = self.build_generator(self.upscale_factor).to(self.device)
+
+        self.optimizer_gen = build_optimizer(self._cfg['GenOptimizer'],
+                                             self.generator.parameters(),
+                                             self.learning_rate_gen)
+        self.scheduler_gen = build_scheduler(self._cfg['GenScheduler'], self.optimizer_gen)
 
     def save_discriminator_model(self):
-        path = self.output_folder + "/" + self.discriminator_name + "-disc-" + str(self.iteration) + ".mdl"
+        checkpoint_path = self.output_folder + "/" + self.discriminator_name + "-disc-" + str(self.iteration) + ".mdl"
         dic = {
             'model_name': self.discriminator_name,
             'upscale': self.upscale_factor,
@@ -125,11 +133,11 @@ class AbstractGanSolver:
             'scheduler': self.scheduler_disc.state_dict()
         }
 
-        save(dic, path)
+        save(dic, checkpoint_path)
         self.discriminator.to(self.device)
 
     def save_generator_model(self):
-        path = self.output_folder + "/" + self.discriminator_name + "-gen-" + str(self.iteration) + ".mdl"
+        checkpoint_path = self.output_folder + "/" + self.discriminator_name + "-gen-" + str(self.iteration) + ".mdl"
         dic = {
             'model_name': self.generator_name,
             'upscale': self.upscale_factor,
@@ -139,15 +147,15 @@ class AbstractGanSolver:
             'scheduler': self.scheduler_gen.state_dict()
         }
 
-        save(dic, path)
+        save(dic, checkpoint_path)
         self.generator.to(self.device)
 
     def save_model(self):
         self.save_discriminator_model()
         self.save_generator_model()
 
-    def load_discriminator_model(self, path: str):
-        state = load(path)
+    def load_discriminator_model(self, model_path: str):
+        state = load(model_path)
 
         if state['model_name'] != self.discriminator_name:
             raise Exception("This snapshot is for model " + state['model_name'] + "!")
@@ -155,38 +163,41 @@ class AbstractGanSolver:
         self.iteration = state['iteration']
         self.upscale_factor = state['upscale']
 
-        self.discriminator = self.get_discriminator_instance(self.upscale_factor).to(self.device)
-
+        self.discriminator: Module = self.build_discriminator(self.upscale_factor).to(self.device)
         self.discriminator.load_state_dict(state['model'])
 
-        self.optimizer_disc = optim.Adam(self.discriminator.parameters(), lr=self.learning_rate_disc)
-        self.scheduler_disc = self.create_discriminator_scheduler(self.optimizer_disc)
-
+        self.optimizer_disc = build_optimizer(self._cfg['DiscOptimizer'], self.discriminator.parameters,
+                                              self.learning_rate_disc)
         self.optimizer_disc.load_state_dict(state['optimizer'])
+
+        self.scheduler_disc = build_scheduler(self._cfg['DiscScheduler'], self.optimizer_disc)
         self.scheduler_disc.load_state_dict(state['scheduler'])
 
-    def load_generator_model(self, path: str):
-        state = load(path)
-
-        if state['model_name'] != self.generator_name:
-            # raise Exception("This snapshot is for model " + state['model_name'] + "!")
-            print("Using generator from model " + state['model_name'], file=stderr)
+    def load_generator_model(self, model_path: str):
+        state = load(model_path)
 
         self.iteration = state['iteration']
         self.upscale_factor = state['upscale']
 
-        self.generator = self.get_generator_instance(self.upscale_factor).to(self.device)
-
+        self.generator = self.build_generator(self.upscale_factor).to(self.device)
         self.generator.load_state_dict(state['model'])
 
-        self.optimizer_gen = optim.Adam(self.generator.parameters(), lr=self.learning_rate_gen)
-        self.scheduler_gen = self.create_generator_scheduler(self.optimizer_gen)
-
+        self.optimizer_gen = build_optimizer(self._cfg['GenOptimizer'], self.generator.parameters(),
+                                             self.learning_rate_gen)
         self.optimizer_gen.load_state_dict(state['optimizer'])
+
+        self.scheduler_gen = build_scheduler(self._cfg['GenScheduler'], self.optimizer_gen)
         self.scheduler_gen.load_state_dict(state['scheduler'])
 
     def train_setup(self) -> None:
         assert self._cfg is not None, "Create solver with config to train!"
+
+        try:
+            mkdir(self.output_folder)
+        except Exception:
+            print("Can't create output folder!", file=stderr)
+            ex_type, ex_inst, ex_tb = exc_info()
+            raise ex_type.with_traceback(ex_inst, ex_tb)
 
         # save model description
         for file, attr, loss in (('/arch_gen.txt', self.generator, self.compute_generator_loss),
@@ -196,7 +207,8 @@ class AbstractGanSolver:
                 f.write(getsource(attr.forward) + '\n\n')
                 f.write(getsource(loss))
 
-        self._cfg.save(self.output_folder)
+        with open(self.output_folder + '/config.ini', 'w') as f:
+            self._cfg.write(f)
 
         self.drawer = Drawer(self.output_folder, scale_factor=self.upscale_factor)
         self.logger = Logger(self.output_folder)
@@ -210,16 +222,19 @@ class AbstractGanSolver:
     def train(self, train_set: DataLoader, test_set: DataLoader) -> None:
         self.train_setup()
 
+        progress_bar = tqdm(total=self.iter_limit)
+
         while self.iteration <= self.iter_limit:
             for _, (data, target) in enumerate(train_set):
-                if data.size()[0] != self.batch_size:
-                    continue
+                # TODO: to incude evaluation or not to
+                # reset timer in case test iterations were executed
+                # progress_bar.last_print_t = time()
 
                 data, target = data.to(self.device), target.to(self.device)
                 sr_img = self.generator(data)
 
                 # ######### Train discriminator ########
-                response = self.compute_discriminator(sr_img, target)
+                response = self.discriminator(cat((target, sr_img)))
 
                 discriminator_train_loss = self.compute_discriminator_loss(response)
                 discriminator_train_loss_value = discriminator_train_loss.item()
@@ -228,7 +243,8 @@ class AbstractGanSolver:
                 discriminator_train_loss.backward(retain_graph=True)
 
                 self.optimizer_disc.step()
-                self.scheduler_disc.step()
+                # TODO: verify if it works also without ReduceLRonPlatau
+                self.scheduler_disc.step(discriminator_train_loss_value)
 
                 # ######## Train generator #########
                 self.generator.zero_grad()
@@ -238,9 +254,10 @@ class AbstractGanSolver:
 
                 generator_train_loss.backward()
                 self.optimizer_gen.step()
-                self.scheduler_gen.step()
+                self.scheduler_gen.step(generator_train_loss_value)
 
                 sr_img, target = sr_img.cpu(), target.cpu()
+                progress_bar.update()
 
                 # ######## Statistics #########
                 if self.iteration > 0 and self.iteration % self.iter_to_eval == 0:
@@ -256,21 +273,21 @@ class AbstractGanSolver:
                     # TODO: refactor
                     # do we even need PSNR?
                     (generator_test_loss_value, discriminator_test_loss_value), \
-                    (psnr, psnr_diff), (distance_mean, distance_var) = self.evaluate(test_set)
+                    (psnr, psnr_diff), distances = self.evaluate(test_set)
 
                     if self.logger:
-                        line = " ".join([f"Iter: {self.iteration:}",
-                                         f"Gen_Train_loss: {round(generator_train_loss_value, 5):.5f}",
-                                         f"Disc_Train_loss: {round(discriminator_train_loss_value, 5):.5f}",
-                                         f"Gen_Test_loss: {round(generator_test_loss_value, 5):.5f}",
-                                         f"Disc_Test_loss: {round(discriminator_test_loss_value, 5):.5f}",
-                                         f"PSNR: {round(psnr, 3):.3f}",
-                                         f"PSNR_diff: {round(psnr_diff, 3):.3f}",
-                                         f"Identity_dist_mean: {round(distance_mean, 5):.5f}",
-                                         f"Identity_dist_var: {round(distance_var, 5):.5f}",
-                                         f"PixelLoss: {round(log_losses[0], 6):.6f}",
-                                         f"AdvLoss: {round(log_losses[1], 6):.6f}",
-                                         f"FeatureLoss: {round(log_losses[2], 6):.6f}",
+                        line = " ".join([f"Iter:{self.iteration:}",
+                                         f"Gen_Train_loss:{round(generator_train_loss_value, 5):.5f}",
+                                         f"Disc_Train_loss:{round(discriminator_train_loss_value, 5):.5f}",
+                                         f"Gen_Test_loss:{round(generator_test_loss_value, 5):.5f}",
+                                         f"Disc_Test_loss:{round(discriminator_test_loss_value, 5):.5f}",
+                                         f"PSNR:{round(psnr, 3):.3f}",
+                                         f"PSNR_diff:{round(psnr_diff, 3):.3f}",
+                                         f"Identity_dist_mean:{round(distances.mean(), 5):.5f}",
+                                         f"Identity_dist_var:{round(distances.var(), 5):.5f}",
+                                         f"PixelLoss:{log_losses[0]:.7f}",
+                                         f"AdvLoss:{log_losses[1]:.7f}",
+                                         f"FeatureLoss:{log_losses[2]:.7f}",
                                          ])
                         self.logger.log(line)
 
@@ -284,39 +301,14 @@ class AbstractGanSolver:
                     self.save_generator_model()
                     self.save_discriminator_model()
 
-                    # for ReduceLRonPlateau
-                    # self.scheduler.step(train_loss)
+        progress_bar.close()
 
-    def compute_discriminator(self, sr_img: tensor, hr_img: tensor):
-        """
-        Args:
-            sr_img(tensor): tensor containing generated image (output of network)
-            hr_img(tensor): tensor containing ground truth image
-
-        Returns:
-            vector of discriminator responses to each image
-            first half are responses to ground truth and second half to generated image
-        """
-        disc_input = cat((hr_img, sr_img)).to(device(self.device))
-
-        indices = np.array(range(disc_input.size()[0]))
-        # numbers 0-15: real, 16-31: fake
-        np.random.shuffle(indices)
-
-        response = self.discriminator(disc_input[indices])
-        disc_input.to(device('cpu'))
-
-        # sort reponse to be in the same order as concatenated arrays
-        response = response[np.argsort(indices)]
-
-        return response
-
-    def evaluate(self, test_set):
-        assert self.generator and self.discriminator is not None, "Net model not loaded!"
+    def evaluate(self, test_set: DataLoader, identity_only=False):
+        assert self.generator is not None, "Generator model not loaded!"
+        assert self.discriminator is not None or identity_only, "Discriminator model not loaded!"
 
         net_psnr = 0.
         interpolation_psnr = 0.
-        interpolation_loss = 0.
 
         generator_loss_value = 0.
         discriminator_loss_value = 0.
@@ -325,60 +317,53 @@ class AbstractGanSolver:
 
         iterations = 0
 
-        # self.net.eval()
+        self.generator.eval()
+        self.discriminator.eval()
 
         with no_grad():
-            for batch_num, (data, target) in enumerate(test_set):
-                data, target = data.to(self.device), target.to(self.device)
+            # TODO: propagate image path with the image
+            for batch_num, (data, real) in enumerate(test_set):
+                data, real = data.to(self.device), real.to(self.device)
 
-                result = self.generator(data)
+                fake = self.generator(data)
+                mse = self.mse(fake, real).item()
+                net_psnr += 10 * log10(1 / mse)
 
                 # Compute discriminator
-                response = self.compute_discriminator(result, target)
-                discriminator_loss_value = self.compute_discriminator_loss(response).item()
+                if not identity_only:
+                    response = self.discriminator(cat((real, fake)))
+                    response.to(device('cpu'))
+                    discriminator_loss_value = self.compute_discriminator_loss(response).item()
 
-                # ##### Test generator #####
-                mse = self.mse(result, target).item()
-                net_psnr += 10 * log10(1 / mse)
-                tmp, _ = self.compute_generator_loss(response, result, target)
-                generator_loss_value += tmp.item()
+                    # ##### Test generator #####
+                    tmp, _ = self.compute_generator_loss(response, fake, real)
+                    generator_loss_value += tmp.item()
 
-                resized_data = interpolate(data, scale_factor=self.upscale_factor)
-                interpolation_loss += self.mse(resized_data, target).item()
+                resized_data = interpolate(data, scale_factor=self.upscale_factor, mode='bilinear', align_corners=True)
+                interpolation_loss = self.mse(resized_data, real).item()
                 interpolation_psnr += 10 * log10(1 / interpolation_loss)
 
                 resized_data = resized_data.cpu().numpy()
-                result = result.cpu().numpy()
-                target = target.cpu().numpy()
-                # result = (result.cpu().numpy() * 256).astype(np.uint8)[:, :, :, ::-1]
-                # target = (target.cpu().numpy() * 256).astype(np.uint8)[:, :, :, ::-1]
 
-                # security through obscurity
-                # TODO: refactor
-                for res_img, tar_img in zip(np.transpose((result * 256).astype(np.uint8)[:, :, :, ::-1], (0, 2, 3, 1)),
-                                            np.transpose((target * 256).astype(np.uint8)[:, :, :, ::-1], (0, 2, 3, 1))):
+                for res_img, tar_img in zip(fake, real):
+                    target_identity, result_identity = self.identity_extractor(tar_img, res_img)
 
-                    # res_detections = self.face_detector(res_img)
-                    detections = self.face_detector(tar_img)
-
-                    # face not detected
-                    if not len(detections):
+                    if target_identity is None:
                         continue
 
-                    # res_face_shape = self.face_localizer(res_img, res_detections[0])
-                    face_shape = self.face_localizer(tar_img, detections[0])
+                    # TODO: verify for senet
+                    # TODO: mtcnn detections
+                    identity_dists.append(self.identity_extractor.identity_dist(result_identity, target_identity))
 
-                    result_identity = np.array(self.identityNN.compute_face_descriptor(res_img, face_shape))
-                    target_identity = np.array(self.identityNN.compute_face_descriptor(tar_img, face_shape))
-
-                    identity_dist += np.sum(result_identity ** 2) + np.sum(target_identity ** 2) \
-                                     - 2 * np.dot(result_identity, target_identity)
-                    identity_dists.append(np.sum(result_identity ** 2) + np.sum(target_identity ** 2)
-                                          - 2 * np.dot(result_identity, target_identity))
+                fake = fake.cpu().numpy()
+                real = real.cpu().numpy()
 
                 iterations += 1
                 if self.test_iter is not None and iterations % self.test_iter == 0:
                     break
+
+        self.generator.train()
+        self.discriminator.train()
 
         net_psnr /= iterations
         interpolation_psnr /= iterations
@@ -391,17 +376,16 @@ class AbstractGanSolver:
 
         if self.drawer is not None and self.iteration % self.iter_per_image == 0:
             data = resized_data.transpose((0, 2, 3, 1))
-            result = result.transpose((0, 2, 3, 1))
-            target = target.transpose((0, 2, 3, 1))
+            fake = fake.transpose((0, 2, 3, 1))
+            real = real.transpose((0, 2, 3, 1))
 
-            self.drawer.save_images(data, result, target, "Test-" + str(self.iteration))
+            self.drawer.save_images(data, fake, real, "Test-" + str(self.iteration))
 
-        # self.net.train()
         return (generator_loss_value, discriminator_loss_value), \
                (net_psnr, net_psnr - interpolation_psnr), \
-               (identity_dists.mean(), identity_dists.var())
+               identity_dists
 
-    def test(self):
+    def test(self, test_set: DataLoader):
         pass
 
     def single_pass(self, image: Image, downscale: bool) -> Tuple[np.ndarray, np.ndarray]:
@@ -411,7 +395,7 @@ class AbstractGanSolver:
 
         factor = self.upscale_factor if downscale else 1
 
-        # in_transform = Compose([CenterCrop((216, 176)), Resize((216 // factor, 176 // factor)), ToTensor()])
+        # in_transform = Compose([CenterCrop((208, 176)), Resize((208 // factor, 176 // factor)), ToTensor()])
         # eval_transform = Compose([CenterCrop((216, 176)), ToTensor()])
 
         in_transform = Compose([ToTensor()])
@@ -422,7 +406,6 @@ class AbstractGanSolver:
         # add dimension so that tensor is 4d
         inp = in_transform(image).to(self.device).unsqueeze(0)
 
-        # TODO: fix
         with no_grad():
             result = self.generator(inp)
 

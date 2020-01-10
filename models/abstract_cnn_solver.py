@@ -1,27 +1,41 @@
-from datetime import datetime
-from inspect import getsource
+import dlib
 import numpy as np
+
+from configparser import ConfigParser, SectionProxy
+from datetime import datetime
+from inspect import getsource, getframeinfo, currentframe
 from numpy import log10
 from os import mkdir
+from os.path import dirname, abspath
 from PIL import Image
-from sys import exc_info, stderr
+from sys import exc_info, stderr, path
 from time import time
-from typing import Tuple
+from typing import Tuple, Optional
 
 from torch import load, save, no_grad, device, optim, cuda
-from torch.nn import MSELoss
+from torch.nn import MSELoss, Module
 from torch.nn.functional import interpolate
 from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop
 from torch.utils.data import DataLoader
 
-from utils import Drawer, Logger
-from utils.config import CnnConfig
+from factory import build_feature_extractor, build_scheduler, build_optimizer
+
+try:
+    from utils import Drawer, Logger
+    from utils.config import CnnConfig
+except ModuleNotFoundError:
+    script = getframeinfo(currentframe()).filename
+    root_dir = dirname((abspath(script)))
+    path.append(root_dir)
+    from utils import Drawer, Logger
+    from utils.config import CnnConfig
 
 from abc import ABC, abstractmethod
 
 
-class AbstractCnnSolver:
-    def __init__(self, cfg: CnnConfig=None):
+class AbstractCnnSolver(ABC):
+    def __init__(self, config: ConfigParser = None):
+
         self.iteration = 0
         self.learning_rate = None
         self.net = None
@@ -35,22 +49,27 @@ class AbstractCnnSolver:
         self.test_iter = None
         self.upscale_factor = None
 
-        #TODO: get cuda device from config
         self.device = device("cuda" if cuda.is_available() else "cpu")
 
-        if cfg is not None:
-            self._cfg = cfg
-            self.batch_size = cfg.batch_size
-            self.learning_rate = cfg.learning_rate
-            self.upscale_factor = cfg.scale_factor
+        if config is not None:
+            self._cfg = config
+            nn_cfg: SectionProxy = config["CNN"]
 
-            self.iter_limit = cfg.iter_limit
-            self.iter_per_snapshot = cfg.iter_per_snapshot
-            self.iter_per_image = cfg.iter_per_image
-            self.iter_to_eval = cfg.iter_per_eval
-            self.test_iter = cfg.test_iter
+            self.device = device(nn_cfg['Device'])
+            self.batch_size = nn_cfg.getint('BatchSize')
+            self.upscale_factor = nn_cfg.getint('UpscaleFactor')
+            self.learning_rate = nn_cfg.getfloat('LearningRate')
 
-            self.output_folder = cfg.output_folder
+            self.iter_limit = nn_cfg.getint('IterationLimit')
+            self.iter_per_snapshot = nn_cfg.getint('IterationsPerSnapshot')
+            self.iter_per_image = nn_cfg.getint('IterationsPerImage')
+            self.iter_to_eval = nn_cfg.getint('IterationsToEvaluation')
+            self.test_iter = nn_cfg.getint('EvaluationIterations')
+
+            timestamp = str(datetime.fromtimestamp(time()).strftime('%Y.%m.%d-%H:%M:%S'))
+            self.output_folder = nn_cfg['OutputFolder'] + "/" + self.name + "-" + timestamp
+
+            self.identity_extractor = build_feature_extractor(config['FeatureExtractor'])
 
         self.mse = MSELoss()
 
@@ -70,20 +89,13 @@ class AbstractCnnSolver:
     def compute_loss(self, output, target):
         pass
 
-    @staticmethod
-    def create_scheduler(optimizer):
-        # self.scheduler = optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.5)
-        # self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, cooldown=5000,
-        #                                                      patience=200, factor=0.5)
-        return optim.lr_scheduler.MultiStepLR(optimizer, milestones=[20000, 40000, 60000, 80000], gamma=0.2)
-
     def build_models(self):
-        self.net = self.get_net_instance(self.upscale_factor).to(self.device)
-        self.optimizer = optim.Adam(self.net.parameters(), lr=self.learning_rate)
-        self.scheduler = self.create_scheduler(self.optimizer)
+        self.net: Module = self.get_net_instance(self.upscale_factor).to(self.device)
+        self.optimizer = build_optimizer(self._cfg['Optimizer'], self.net.parameters(), self.learning_rate)
+        self.scheduler = build_scheduler(self._cfg['Scheduler'], self.optimizer)
 
     def save_model(self):
-        path = self.output_folder + "/" + self.name + "-" + str(self.iteration) + ".mdl"
+        checkpoint_path = self.output_folder + "/" + self.name + "-" + str(self.iteration) + ".mdl"
         dic = {
             'model_name': self.name,
             'upscale': self.upscale_factor,
@@ -93,11 +105,11 @@ class AbstractCnnSolver:
             'scheduler': self.scheduler.state_dict()
         }
 
-        save(dic, path)
+        save(dic, checkpoint_path)
         self.net.to(self.device)
 
-    def load_model(self, path: str):
-        state = load(path)
+    def load_model(self, model_path: str):
+        state = load(model_path)
 
         if state['model_name'] != self.name:
             raise Exception("This snapshot is for model " + state['model_name'] + "!")
@@ -105,24 +117,35 @@ class AbstractCnnSolver:
         self.iteration = state['iteration']
         self.upscale_factor = state['upscale']
 
-        self.net = self.get_net_instance(self.upscale_factor).to(self.device)
+        self.net: Module = self.get_net_instance(self.upscale_factor).to(self.device)
         self.net.load_state_dict(state['model'])
 
-        self.optimizer = optim.Adam(self.net.parameters())
-        self.scheduler = self.create_scheduler(self.optimizer)
-
+        self.optimizer = build_optimizer(self._cfg['Optimizer'], self.net.parameters(), self.learning_rate)
         self.optimizer.load_state_dict(state['optimizer'])
+
+        self.scheduler = build_scheduler(self._cfg['Scheduler'], self.optimizer)
         self.scheduler.load_state_dict(state['scheduler'])
 
     def train_setup(self) -> None:
         assert self._cfg is not None, "Create solver with config to train!"
+
+        # create output folder
+        try:
+            mkdir(self.output_folder)
+        except Exception:
+            print("Can't create output folder!", file=stderr)
+            ex_type, ex_inst, ex_tb = exc_info()
+            raise ex_type.with_traceback(ex_inst, ex_tb)
 
         # save model description
         with open(self.output_folder + "/arch.txt", 'w') as f:
             f.write(str(self.net) + "\n\n")
             f.write(getsource(self.net.forward))
 
-        self._cfg.save(self.output_folder)
+        # save config
+        with open(self.output_folder + '/config.ini', 'w') as f:
+            self._cfg.write(f)
+
         self.drawer = Drawer(self.output_folder, scale_factor=self.upscale_factor)
         self.logger = Logger(self.output_folder)
 
@@ -146,44 +169,49 @@ class AbstractCnnSolver:
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                self.scheduler.step()
 
                 # evaluate
                 if self.iteration > 0 and self.iteration % self.iter_to_eval == 0:
 
                     # store training collage
                     if self.drawer and self.iteration % self.iter_per_image == 0:
-                        data = interpolate(data, scale_factor=self.upscale_factor, mode='nearest', align_corners=True)\
+                        data = interpolate(data, scale_factor=self.upscale_factor) \
                             .cpu().numpy().transpose((0, 2, 3, 1))
                         target = target.cpu().numpy().transpose((0, 2, 3, 1))
                         result = result.detach().cpu().numpy().transpose((0, 2, 3, 1))
 
                         self.drawer.save_images(data, result, target, "Train-" + str(self.iteration))
 
-                    test_loss, psnr, psnr_diff = self.evaluate(test_set)
+                    (test_loss, _), (psnr, psnr_diff), distances = self.evaluate(test_set)
 
                     if self.logger:
-                        line = " ".join(["Iter:" + str(self.iteration),
-                                         "Train_loss:" + str(round(train_loss, 5)),
-                                         "Test_loss:" + str(round(test_loss, 5)),
-                                         "PSNR:" + str(round(psnr, 5)),
-                                         "PSNR_diff:" + str(round(psnr_diff, 5))
+                        line = " ".join([f"Iter:{self.iteration}",
+                                         f"Train_loss:{round(train_loss, 5)}",
+                                         f"Test_loss:{round(test_loss, 5)}",
+                                         f"PSNR:{round(psnr, 5)}",
+                                         f"PSNR_diff:{round(psnr_diff, 5)}",
+                                         f"Identity_dist_mean:{round(distances.mean(), 5):.5f}",
+                                         f"Identity_dist_var:{round(distances.var(), 5):.5f}",
                                          ])
                         self.logger.log(line)
+
+                # snapshot
+                if self.iteration % self.iter_per_snapshot == 0 and self.iteration > 0:
+                    self.save_model()
 
                 if self.iteration > self.iter_limit:
                     break
 
                 self.iteration += 1
 
-                # snapshot
-                if self.iteration % self.iter_per_snapshot == 0:
-                    self.save_model()
+                old_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+                self.scheduler.step(train_loss)
+                new_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
 
-            # for ReduceLROnPlateau
-            #self.scheduler.step(train_loss)
+                if old_lr != new_lr:
+                    self.logger.log("LearningRateAdapted")
 
-    def evaluate(self, test_set):
+    def evaluate(self, test_set, identity_only=False):
         assert self.net is not None, "Net model not loaded!"
 
         net_psnr = 0.
@@ -191,41 +219,60 @@ class AbstractCnnSolver:
         test_loss = 0.
         iterations = 0
 
-        #self.net.eval()
+        identity_dists = []
+
+        self.net.eval()
 
         with no_grad():
-            for batch_num, (data, target) in enumerate(test_set):
-                data, target = data.to(self.device), target.to(self.device)
+            for batch_num, (data, real) in enumerate(test_set):
+                data, real = data.to(self.device), real.to(self.device)
 
-                result = self.net(data)
-                test_loss = self.compute_loss(result, target).item()
-                mse_loss = self.mse(result, target).item()
-                net_psnr += 10 * log10(1 / mse_loss)
+                fake = self.net(data)
+
+                if not identity_only:
+                    test_loss = self.compute_loss(fake, real).item()
+                    mse_loss = self.mse(fake, real).item()
+                    net_psnr += 10 * log10(1 / mse_loss)
 
                 resized_data = interpolate(data, scale_factor=self.upscale_factor, mode='bilinear', align_corners=True)
-                bilinear_mse_loss = self.mse(resized_data, target).item()
+                bilinear_mse_loss = self.mse(resized_data, real).item()
                 bilinear_psnr += 10 * log10(1 / bilinear_mse_loss)
 
-                resized_data = resized_data.cpu()
-                result = result.cpu()
-                target = target.cpu()
+                resized_data = resized_data.cpu().numpy()
+
+                for res_img, tar_img in zip(fake, real):
+                    target_identity, result_identity = self.identity_extractor(tar_img, res_img)
+
+                    if target_identity is None:
+                        continue
+
+                    # TODO: verify for senet
+                    # TODO: mtcnn detections
+                    identity_dists.append(self.identity_extractor.identity_dist(result_identity, target_identity))
+
+                fake = fake.cpu().numpy()
+                real = real.cpu().numpy()
 
                 iterations += 1
-                if self.test_iter is not None and iterations % self.test_iter == 0:
+                if self.test_iter is not None and iterations >= self.test_iter:
                     break
+
+        self.net.train()
 
         net_psnr /= iterations
         bilinear_psnr /= iterations
 
         if self.drawer is not None and self.iteration % self.iter_per_image == 0:
-            data = resized_data.numpy().transpose((0, 2, 3, 1))
-            result = result.numpy().transpose((0, 2, 3, 1))
-            target = target.numpy().transpose((0, 2, 3, 1))
+            data = resized_data.transpose((0, 2, 3, 1))
+            fake = fake.transpose((0, 2, 3, 1))
+            real = real.transpose((0, 2, 3, 1))
 
-            self.drawer.save_images(data, result, target, "Test-" + str(self.iteration))
+            self.drawer.save_images(data, fake, real, "Test-" + str(self.iteration))
 
-        #self.net.train()
-        return test_loss, net_psnr, net_psnr - bilinear_psnr
+        # self.net.train()
+        return (test_loss, 0.), \
+               (net_psnr, net_psnr - bilinear_psnr), \
+               np.array(identity_dists)
 
     def test(self):
         pass
@@ -237,13 +284,13 @@ class AbstractCnnSolver:
 
         factor = self.upscale_factor if downscale else 1
 
-        #in_transform = Compose([CenterCrop((216, 176)), Resize((216 // factor, 176 // factor)), ToTensor()])
-        #eval_transform = Compose([CenterCrop((216, 176)), ToTensor()])
+        # in_transform = Compose([CenterCrop((216, 176)), Resize((216 // factor, 176 // factor)), ToTensor()])
+        # eval_transform = Compose([CenterCrop((216, 176)), ToTensor()])
 
         in_transform = Compose([ToTensor()])
         eval_transform = Compose([ToTensor()])
 
-        #transform = Compose([Resize((256 // factor, 256 // factor)), ToTensor()])
+        # transform = Compose([Resize((256 // factor, 256 // factor)), ToTensor()])
 
         # add dimension so that tensor is 4d
         inp = in_transform(image).to(self.device).unsqueeze(0)

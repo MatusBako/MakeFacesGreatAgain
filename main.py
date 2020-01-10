@@ -1,41 +1,49 @@
 #!/usr/bin/env python3
 
-from datasets import DatasetImagenet, DatasetCelebA
-from utils import ConfigWrapper
+from datasets import DatasetFFHQ # DatasetImagenet, DatasetCelebA, DatasetFFHQ
 
 import argparse
+from configparser import ConfigParser
 from torch.utils.data import DataLoader
 from sys import exc_info
 
 
-def get_config() -> ConfigWrapper:
+def get_config() -> ConfigParser:
     parser = argparse.ArgumentParser()
     parser.add_argument('config', help='Config file of net.')
     args = parser.parse_args()
 
-    return ConfigWrapper(args.config)
+    config = ConfigParser()
+    config.read(args.config)
+    return config
 
 
 def main():
     config = get_config()
+    nn_config = config['CNN'] if 'CNN' in config else config['GAN']
 
     # dynamically import Solver
-    Solver = __import__("models." + config.model_name, fromlist=['Solver']).Solver
+    Solver = __import__("models." + nn_config['Discriminator'], fromlist=['Solver']).Solver
     solver = Solver(config)
 
-    train_set = DatasetCelebA(config.train_data, config.scale_factor)
-    test_set = DatasetCelebA(config.test_data, config.scale_factor)
-    #train_set = DatasetImagenet(config.train_data, config.scale_factor)
-    #test_set = DatasetImagenet(config.test_data, config.scale_factor)
+    # TODO: dynamically choose dataset loader based on config
+    train_set = DatasetFFHQ(nn_config['TrainData'], nn_config.getint('UpscaleFactor'), length=100)
+    test_set = DatasetFFHQ(nn_config['TestData'], nn_config.getint('UpscaleFactor'), length=100)
+    #train_set = DatasetCelebA(nn_config['TrainDta'], nn_config['UpscaleFactor'])
+    #test_set = DatasetCelebA(nn_config['TestDta'], nn_config['UpscaleFactor'])
 
-    training_data_loader = DataLoader(dataset=train_set, batch_size=config.batch_size, shuffle=True)
-    testing_data_loader = DataLoader(dataset=test_set, batch_size=config.batch_size, shuffle=True)
+    training_data_loader = DataLoader(dataset=train_set, batch_size=nn_config.getint('BatchSize'), shuffle=True)
+    testing_data_loader = DataLoader(dataset=test_set, batch_size=nn_config.getint('BatchSize'), shuffle=True)
 
-    solver.build_models(config)
+    solver.build_models()
 
-    # TODO: model loading
-    if config.snapshot is not None:
-        solver.load_model(config.snapshot)
+    if 'CNN' in config and 'Snapshot' in nn_config:
+        solver.load_model(nn_config['Snapshot'])
+    elif 'GAN' in config:
+        if 'GeneratorSnapshot' in nn_config:
+            solver.load_generator_model(nn_config.get('GeneratorSnapshot'))
+        if 'DiscriminatorSnapshot' in nn_config:
+            solver.load_discriminator_model(nn_config.get('DiscriminatorSnapshot'))
 
     try:
         solver.train(training_data_loader, testing_data_loader)
