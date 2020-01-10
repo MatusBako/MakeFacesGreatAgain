@@ -17,8 +17,9 @@ class Logger:
     def log(self, line):
         self._lines.append(line)
 
-        if len(self._lines) > 100:
+        if len(self._lines) > 5:
             self._file.write("\n".join(self._lines) + "\n")
+            self._file.flush()
             self._lines.clear()
 
     def finish(self):

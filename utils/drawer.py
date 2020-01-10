@@ -17,11 +17,12 @@ class Drawer:
         limit = 16 if img_count >= 16 else img_count
 
         height, width, _ = result[0].shape
-
         stacks = []
-        for i in range(0, 16, 4):
+
+        # TODO: fix so that image count doesn't have to be divisible by 4 (need to add zero arrays)
+        for i in range(0, img_count, 4):
             to_stack = []
-            for j in range(i, i + 4):
+            for j in range(i, np.min([i + 4, img_count])):
                 to_stack.append(data[j] * 256)
                 to_stack.append(result[j] * 256)
                 to_stack.append(target[j] * 256)
