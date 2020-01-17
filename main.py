@@ -23,7 +23,10 @@ def main():
     nn_config = config['CNN'] if 'CNN' in config else config['GAN']
 
     # dynamically import Solver
-    Solver = __import__("models." + nn_config['Discriminator'], fromlist=['Solver']).Solver
+    if 'GAN' in config:
+        Solver = __import__("models." + nn_config['Discriminator'], fromlist=['Solver']).Solver
+    elif 'CNN' in config:
+        Solver = __import__("models." + nn_config['ModelName'], fromlist=['Solver']).Solver
     solver = Solver(config)
 
     # TODO: dynamically choose dataset loader based on config
