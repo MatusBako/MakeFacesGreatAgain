@@ -20,7 +20,7 @@ class DlibFeatureExtractor:
         img = np.transpose(img, (1, 2, 0))[:, :, ::-1]
         return img.astype(np.uint8)
 
-    def __call__(self, img: Tensor, img2: Tensor = None) -> Optional[Union[np.ndarray, Tuple]]:
+    def __call__(self, _, img: Tensor, img2: Tensor = None) -> Optional[Union[np.ndarray, Tuple]]:
         """
         Compute feature descriptor for given image using dlib feature extractor. Uses the same detections from
         the first image, if two images supplied.

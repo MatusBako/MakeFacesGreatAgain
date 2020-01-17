@@ -50,11 +50,12 @@ class Senet50FeatureExtractor:
         return img.astype(np.uint8)
 
 
-    def __call__(self, img: Tensor, img2: Tensor = None, path=None) -> Optional[Union[np.ndarray, Tuple]]:
+    def __call__(self, label, img: Tensor, img2: Tensor = None, path=None) -> Optional[Union[np.ndarray, Tuple]]:
         """
         Compute feature descriptor for given image using dlib feature extractor. Uses the same detections from
         the first image, if two images supplied.
 
+        :param label:
         :param img:
         :param img2:
         :param path: path to image used for getting stored detections
