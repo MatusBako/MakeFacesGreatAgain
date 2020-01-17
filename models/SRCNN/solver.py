@@ -1,7 +1,7 @@
 from torch.nn import MSELoss
 
 from .model import Net
-from utils import CnnConfig
+from utils.config import CnnConfig
 
 from os.path import dirname, abspath
 from inspect import getframeinfo, currentframe
@@ -17,6 +17,7 @@ except ValueError:
     models_dir = dirname(dirname(abspath(script)))
     path.append(models_dir)
     from abstract_cnn_solver import AbstractCnnSolver
+
 
 class Solver(AbstractCnnSolver):
     def __init__(self, cfg: CnnConfig = None):

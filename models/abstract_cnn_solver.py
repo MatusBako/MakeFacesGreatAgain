@@ -10,6 +10,7 @@ from os.path import dirname, abspath
 from PIL import Image
 from sys import exc_info, stderr, path
 from time import time
+from tqdm import tqdm
 from typing import Tuple, Optional
 
 from torch import load, save, no_grad, device, optim, cuda
@@ -22,13 +23,11 @@ from factory import build_feature_extractor, build_scheduler, build_optimizer
 
 try:
     from utils import Drawer, Logger
-    from utils.config import CnnConfig
 except ModuleNotFoundError:
     script = getframeinfo(currentframe()).filename
     root_dir = dirname((abspath(script)))
     path.append(root_dir)
     from utils import Drawer, Logger
-    from utils.config import CnnConfig
 
 from abc import ABC, abstractmethod
 
@@ -157,8 +156,10 @@ class AbstractCnnSolver(ABC):
     def train(self, train_set: DataLoader, test_set: DataLoader) -> None:
         self.train_setup()
 
+        progress_bar = tqdm(total=self.iter_limit)
+
         while self.iteration <= self.iter_limit:
-            for _, (data, target) in enumerate(train_set):
+            for _, (labels, data, target) in enumerate(train_set):
                 data, target = data.to(self.device), target.to(self.device)
 
                 result = self.net(data)
@@ -170,7 +171,9 @@ class AbstractCnnSolver(ABC):
                 loss.backward()
                 self.optimizer.step()
 
-                # evaluate
+                self.iteration += 1
+
+                # ######## Statistics #########
                 if self.iteration > 0 and self.iteration % self.iter_to_eval == 0:
 
                     # store training collage
@@ -202,14 +205,15 @@ class AbstractCnnSolver(ABC):
                 if self.iteration > self.iter_limit:
                     break
 
-                self.iteration += 1
+                if isinstance(self.optimizer, optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+                    self.scheduler.step(train_loss)
+                    new_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
 
-                old_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
-                self.scheduler.step(train_loss)
-                new_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+                    if old_lr != new_lr:
+                        self.logger.log("LearningRateAdapted")
 
-                if old_lr != new_lr:
-                    self.logger.log("LearningRateAdapted")
+                progress_bar.update()
 
     def evaluate(self, test_set, identity_only=False):
         assert self.net is not None, "Net model not loaded!"
@@ -224,7 +228,7 @@ class AbstractCnnSolver(ABC):
         self.net.eval()
 
         with no_grad():
-            for batch_num, (data, real) in enumerate(test_set):
+            for batch_num, (labels, data, real) in enumerate(test_set):
                 data, real = data.to(self.device), real.to(self.device)
 
                 fake = self.net(data)
@@ -240,7 +244,7 @@ class AbstractCnnSolver(ABC):
 
                 resized_data = resized_data.cpu().numpy()
 
-                for res_img, tar_img in zip(fake, real):
+                for label, res_img, tar_img in zip(labels, fake, real):
                     target_identity, result_identity = self.identity_extractor(tar_img, res_img)
 
                     if target_identity is None:
@@ -248,7 +252,8 @@ class AbstractCnnSolver(ABC):
 
                     # TODO: verify for senet
                     # TODO: mtcnn detections
-                    identity_dists.append(self.identity_extractor.identity_dist(result_identity, target_identity))
+                    identity_dists.append(
+                        self.identity_extractor.identity_dist(label, result_identity, target_identity))
 
                 fake = fake.cpu().numpy()
                 real = real.cpu().numpy()

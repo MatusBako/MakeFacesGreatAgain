@@ -30,4 +30,4 @@ class Solver(AbstractCnnSolver):
 
     @property
     def name(self):
-        return "SRResNet"
+        return "SRResNet16"

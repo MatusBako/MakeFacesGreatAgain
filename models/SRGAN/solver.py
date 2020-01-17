@@ -35,10 +35,10 @@ class Solver(AbstractGanSolver):
         self.std = tensor([0.229, 0.224, 0.225]).view((1, 3, 1, 1)).to(nn_config['Device'])
         self.normalizer = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-        self.ones_const = ones(self.batch_size, device=nn_config['Device'])
-        self.zeros_const = zeros(self.batch_size, device=nn_config['Device'])
-        self.d_loss_response = cat((ones(self.batch_size, device=nn_config['Device']),
-                                    zeros(self.batch_size, device=nn_config['Device'])))
+        self.ones_const = ones(self.batch_size, device=nn_config['Device'], requires_grad=False)
+        self.zeros_const = zeros(self.batch_size, device=nn_config['Device'], requires_grad=False)
+        self.d_loss_response = cat((ones(self.batch_size, device=nn_config['Device'], requires_grad=False),
+                                    zeros(self.batch_size, device=nn_config['Device'], requires_grad=False)))
 
         self.eps = 1e-8
 
@@ -52,7 +52,7 @@ class Solver(AbstractGanSolver):
     def build_discriminator(self, *args, **kwargs) -> Discriminator:
         return Discriminator()
 
-    def compute_discriminator_loss(self, response: tensor, *args, **kwargs) -> tensor:
+    def compute_discriminator_loss(self, response: tensor, real_img, fake_img, *args, **kwargs) -> tensor:
         real_response, fake_response = sigmoid(response).split(response.size(0) // 2)
         return mean(- log(real_response + self.eps) - log(1 - fake_response + self.eps))
         #return self.bce(response, self.d_loss_response)

@@ -14,7 +14,6 @@ from tqdm import tqdm
 from typing import Tuple, Optional
 
 from torch import load, save, no_grad, device, optim, cuda, cat, tensor
-from torch.autograd import Variable
 from torch.nn import MSELoss, Module
 from torch.nn.functional import interpolate
 from torchvision.transforms import Compose, ToTensor, CenterCrop, Resize
@@ -24,14 +23,11 @@ from factory import build_optimizer, build_scheduler, build_feature_extractor
 
 try:
     from utils import Drawer, Logger
-    from utils.config import CnnConfig
 except ModuleNotFoundError:
     script = getframeinfo(currentframe()).filename
     root_dir = dirname((abspath(script)))
     path.append(root_dir)
     from utils import Drawer, Logger
-    from utils.config import CnnConfig
-
 
 from abc import ABC, abstractmethod
 
@@ -100,7 +96,7 @@ class AbstractGanSolver:
         pass
 
     @abstractmethod
-    def compute_discriminator_loss(self, response, *args, **kwargs):
+    def compute_discriminator_loss(self, response, real_img, fake_img, *args, **kwargs):
         pass
 
     @abstractmethod
@@ -225,18 +221,18 @@ class AbstractGanSolver:
         progress_bar = tqdm(total=self.iter_limit)
 
         while self.iteration <= self.iter_limit:
-            for _, (data, target) in enumerate(train_set):
+            for _, (labels, input_img, target_img) in enumerate(train_set):
                 # TODO: to incude evaluation or not to
                 # reset timer in case test iterations were executed
                 # progress_bar.last_print_t = time()
 
-                data, target = data.to(self.device), target.to(self.device)
-                sr_img = self.generator(data)
+                input_img, target_img = input_img.to(self.device), target_img.to(self.device)
+                fake_img = self.generator(input_img)
 
                 # ######### Train discriminator ########
-                response = self.discriminator(cat((target, sr_img)))
+                response = self.discriminator(cat((target_img, fake_img)))
 
-                discriminator_train_loss = self.compute_discriminator_loss(response)
+                discriminator_train_loss = self.compute_discriminator_loss(response, target_img, fake_img)
                 discriminator_train_loss_value = discriminator_train_loss.item()
 
                 # don't ask why, just keep reading ...
@@ -247,28 +243,29 @@ class AbstractGanSolver:
                 self.scheduler_disc.step(discriminator_train_loss_value)
 
                 # ######## Train generator #########
-                self.generator.zero_grad()
+                self.optimizer_gen.zero_grad()
 
-                generator_train_loss, log_losses = self.compute_generator_loss(response, sr_img, target)
+                generator_train_loss, log_losses = self.compute_generator_loss(response, fake_img, target_img)
                 generator_train_loss_value = generator_train_loss.item()
 
                 generator_train_loss.backward()
                 self.optimizer_gen.step()
                 self.scheduler_gen.step(generator_train_loss_value)
 
-                sr_img, target = sr_img.cpu(), target.cpu()
-                progress_bar.update()
+                fake_img, target_img = fake_img.cpu(), target_img.cpu()
+
+                self.iteration += 1
 
                 # ######## Statistics #########
                 if self.iteration > 0 and self.iteration % self.iter_to_eval == 0:
 
                     # store training collage
                     if self.drawer and self.iteration % self.iter_per_image == 0:
-                        data = interpolate(data, scale_factor=self.upscale_factor).cpu().numpy().transpose((0, 2, 3, 1))
-                        target = target.cpu().numpy().transpose((0, 2, 3, 1))
-                        sr_img = sr_img.detach().cpu().numpy().transpose((0, 2, 3, 1))
+                        input_img = interpolate(input_img, scale_factor=self.upscale_factor).cpu().numpy().transpose((0, 2, 3, 1))
+                        target_img = target_img.cpu().numpy().transpose((0, 2, 3, 1))
+                        fake_img = fake_img.detach().cpu().numpy().transpose((0, 2, 3, 1))
 
-                        self.drawer.save_images(data, sr_img, target, "Train-" + str(self.iteration))
+                        self.drawer.save_images(input_img, fake_img, target_img, "Train-" + str(self.iteration))
 
                     # TODO: refactor
                     # do we even need PSNR?
@@ -294,12 +291,30 @@ class AbstractGanSolver:
                 if self.iteration > self.iter_limit:
                     break
 
-                self.iteration += 1
 
                 # snapshot
                 if self.iteration % self.iter_per_snapshot == 0:
                     self.save_generator_model()
                     self.save_discriminator_model()
+
+                # TODO: move to separate method
+                if isinstance(self.optimizer_gen, optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = self.optimizer_gen.state_dict()['param_groups'][0]['lr']
+                    self.scheduler_gen.step(generator_train_loss)
+                    new_lr = self.optimizer_gen.state_dict()['param_groups'][0]['lr']
+
+                    if old_lr != new_lr:
+                        self.logger.log("LearningRateAdapted")
+
+                if isinstance(self.optimizer_disc, optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = self.optimizer_disc.state_dict()['param_groups'][0]['lr']
+                    self.scheduler_disc.step(generator_train_loss)
+                    new_lr = self.optimizer_disc.state_dict()['param_groups'][0]['lr']
+
+                    if old_lr != new_lr:
+                        self.logger.log("LearningRateAdapted")
+
+                progress_bar.update()
 
         progress_bar.close()
 
@@ -322,7 +337,7 @@ class AbstractGanSolver:
 
         with no_grad():
             # TODO: propagate image path with the image
-            for batch_num, (data, real) in enumerate(test_set):
+            for batch_num, (labels, data, real) in enumerate(test_set):
                 data, real = data.to(self.device), real.to(self.device)
 
                 fake = self.generator(data)
@@ -333,7 +348,7 @@ class AbstractGanSolver:
                 if not identity_only:
                     response = self.discriminator(cat((real, fake)))
                     response.to(device('cpu'))
-                    discriminator_loss_value = self.compute_discriminator_loss(response).item()
+                    discriminator_loss_value = self.compute_discriminator_loss(response, None, None).item()
 
                     # ##### Test generator #####
                     tmp, _ = self.compute_generator_loss(response, fake, real)
@@ -345,8 +360,8 @@ class AbstractGanSolver:
 
                 resized_data = resized_data.cpu().numpy()
 
-                for res_img, tar_img in zip(fake, real):
-                    target_identity, result_identity = self.identity_extractor(tar_img, res_img)
+                for label, res_img, tar_img in zip(labels, fake, real):
+                    target_identity, result_identity = self.identity_extractor(label, tar_img, res_img)
 
                     if target_identity is None:
                         continue
