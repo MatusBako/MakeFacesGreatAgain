@@ -46,7 +46,8 @@ def build_target_transform():
 class DatasetFFHQ(data.Dataset):
     def __init__(self, image_dir, upscale_factor: int = 2, input_transform=None, target_transform=None, length=None):
         super().__init__()
-        self.image_filenames = [join(image_dir, x) for x in sorted(listdir(image_dir))]
+        self.image_labels = sorted(listdir(image_dir))
+        self.image_filenames = [join(image_dir, x) for x in self.image_labels]
 
         self.length = length if length and length <= len(self.image_filenames) else len(self.image_filenames)
 
@@ -72,7 +73,7 @@ class DatasetFFHQ(data.Dataset):
         input_image = self.input_transform(input_image)
         target = self.target_transform(target)
 
-        return input_image, target
+        return self.image_labels[index], input_image, target
 
     def __len__(self):
         return self.length

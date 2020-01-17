@@ -26,8 +26,9 @@ class DatasetSet5(data.Dataset):
 
     def __init__(self, image_dir, upscale_factor=2, input_transform=None, target_transform=None, length=None):
         super(DatasetSet5, self).__init__()
-        self.lr_image_filenames = [join(image_dir, x) for x in filter(lambda x: 'LR' in x, listdir(image_dir))]
-        self.hr_image_filenames = [join(image_dir, x) for x in filter(lambda x: 'HR' in x, listdir(image_dir))]
+        self.image_labels = sorted(listdir(image_dir))
+        self.lr_image_filenames = [join(image_dir, x) for x in filter(lambda x: 'LR' in x, self.image_labels)]
+        self.hr_image_filenames = [join(image_dir, x) for x in filter(lambda x: 'HR' in x, self.image_labels)]
 
         self.length = length if length and length <= len(self.lr_image_filenames) else len(self.lr_image_filenames)
 
@@ -56,7 +57,7 @@ class DatasetSet5(data.Dataset):
         input_image = self.target_transform(input_image)
         target_image = self.target_transform(target_image)
 
-        return input_image, target_image
+        return self.image_labels[index], input_image, target_image
 
     def __len__(self):
         return self.length
