@@ -14,12 +14,12 @@ class Drawer:
     def save_images(self, data: np.array, result: np.array, target: np.array, label: str):
         img_count = result.data.shape[0]
 
-        limit = 16 if img_count >= 16 else img_count
+        img_count = 16 if img_count >= 16 else img_count
+        img_count -= img_count % 4
 
         height, width, _ = result[0].shape
         stacks = []
 
-        # TODO: fix so that image count doesn't have to be divisible by 4 (need to add zero arrays)
         for i in range(0, img_count, 4):
             to_stack = []
             for j in range(i, np.min([i + 4, img_count])):
