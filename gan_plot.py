@@ -3,6 +3,7 @@
 from matplotlib import pyplot as plt
 import numpy as np
 from os import listdir
+from os.path import join, dirname, realpath, exists
 from sys import argv
 from typing import Dict, List
 
@@ -10,7 +11,8 @@ from typing import Dict, List
 def get_args():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('log_path', help='Training log.')
+    parser.add_argument('-l', '--log-path', help='Training log.')
+    parser.add_argument('-a', '--all', action="store_true", help="Redraw all plots of nets in output directory.")
     return parser.parse_args()
 
 
@@ -20,6 +22,11 @@ def transform_lines(lines: Dict[str, List]):
 
     values_per_point = value_cnt // plot_points
     leftovers = value_cnt % plot_points
+
+    # less plot points than expected -> every point is used
+    if values_per_point == 0:
+        values_per_point = 1
+        leftovers = 0
 
     # average values into points
     for key, arr in lines.items():
@@ -32,7 +39,10 @@ def transform_lines(lines: Dict[str, List]):
 
         # leave out few last values, so that each point in plot
         # averages the same number of values
-        arr = np.array(arr[:-leftovers], dtype=arr_t).reshape((-1, values_per_point))
+        if leftovers:
+            arr = np.array(arr[:-leftovers]).reshape((-1, values_per_point))
+        else:
+            arr = np.array(arr).reshape((-1, values_per_point))
 
         if key == 'iter':
             lines[key] = arr.max(axis=1)
@@ -63,9 +73,9 @@ def parse_log(log):
             lines['psnr'].append(float(fields[5].split(":")[-1]))
             lines['diff_psnr'].append(float(fields[6].split(":")[-1]))
             lines['identity_dist'].append(float(fields[7].split(":")[-1]))
-            lines['pixel_loss'].append(float(fields[9].split(":")[-1]))
-            lines['adv_loss'].append(float(fields[10].split(":")[-1]))
-            lines['feature_loss'].append(float(fields[11].split(":")[-1]))
+            lines['pixel_loss'].append(float(fields[8].split(":")[-1]))
+            lines['adv_loss'].append(float(fields[9].split(":")[-1]))
+            lines['feature_loss'].append(float(fields[10].split(":")[-1]))
     return lines, lr_marks
 
 
@@ -125,15 +135,18 @@ def make_plot(folder):
 def main():
     folders = []
 
-    if argv == 1:
+    args = get_args()
+
+    if args.log_path is None:
         for folder in listdir("outputs"):
-            if "plot.png" not in listdir("outputs/" + folder):
+            if args.all or not exists(join("outputs", folder, "plot.png")):
                 folders.append("./outputs/" + folder)
     else:
-        folders.append(argv[1])
+        folders = [dirname(args.log_path)]
 
     for folder in folders:
         make_plot(folder)
+
 
 if __name__ == "__main__":
     main()
