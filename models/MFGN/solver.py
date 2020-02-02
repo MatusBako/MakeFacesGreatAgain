@@ -1,7 +1,6 @@
 from torch.nn import MSELoss
 
 from .model import Net
-from utils import CnnConfig
 
 from os.path import dirname, abspath
 from inspect import getframeinfo, currentframe
@@ -12,13 +11,13 @@ try:
 except ValueError:
     # in case module above isn't in pythonpath
     script = getframeinfo(currentframe()).filename
-    models_dir = dirname(dirname(abspath(script)))
-    path.append(models_dir)
-    from abstract_cnn_solver import AbstractCnnSolver
+    root_dir = dirname(dirname(dirname(abspath(script))))
+    path.append(root_dir)
+    from models.abstract_cnn_solver import AbstractCnnSolver
 
 
 class Solver(AbstractCnnSolver):
-    def __init__(self, cfg: CnnConfig = None):
+    def __init__(self, cfg=None):
         super().__init__(cfg)
         self.loss = MSELoss()
 
@@ -30,4 +29,4 @@ class Solver(AbstractCnnSolver):
 
     @property
     def name(self):
-        return "MFGN"
+        return "MFGN4"

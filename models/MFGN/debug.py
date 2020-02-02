@@ -3,9 +3,9 @@
 from torchvision import models
 from torchsummary import summary
 from torch import device
-from models.MFGN import Net
-#from model import Net
+#from models.MFGN4 import Net
+from model import Net
 
 
 model = Net(4).to(device("cuda:0"))
-print(summary(model, (3, 44, 54)))
+print(summary(model, (3, 256, 256)))

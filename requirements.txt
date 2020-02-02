@@ -1,6 +1,10 @@
-numpy
-PIL
-pytorch
-torchvision
-cv2
 dlib
+matplotlib
+numpy
+Pillow
+pytorch-msssim
+scipy
+torch
+torchvision
+torchsummary
+opencv-python
