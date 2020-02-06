@@ -1,35 +1,30 @@
 import dlib
 import numpy as np
 
+from abc import ABC, abstractmethod
 from configparser import ConfigParser, SectionProxy
+from collections import defaultdict
 from datetime import datetime
-from inspect import getsource, getframeinfo, currentframe
+from inspect import getsource, getframeinfo, currentframe, getfile
 from numpy import log10
-from os import mkdir
-from os.path import dirname, abspath
+from os import mkdir, listdir
+from os.path import dirname, abspath, join
 from PIL import Image
+from pytorch_msssim import ssim
+from shutil import copyfile
 from sys import exc_info, stderr, path
 from time import time
 from tqdm import tqdm
-from typing import Tuple, Optional
+from typing import Tuple, Optional, DefaultDict, List
 
-from torch import load, save, no_grad, device, optim, cuda
+from torch import load, save, no_grad, device, optim, cuda, tensor, uint8
 from torch.nn import MSELoss, Module
 from torch.nn.functional import interpolate
 from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop
 from torch.utils.data import DataLoader
 
 from factory import build_feature_extractor, build_scheduler, build_optimizer
-
-try:
-    from utils import Drawer, Logger
-except ModuleNotFoundError:
-    script = getframeinfo(currentframe()).filename
-    root_dir = dirname((abspath(script)))
-    path.append(root_dir)
-    from utils import Drawer, Logger
-
-from abc import ABC, abstractmethod
+from utils import Drawer, Logger
 
 
 class AbstractCnnSolver(ABC):
@@ -88,6 +83,13 @@ class AbstractCnnSolver(ABC):
     def compute_loss(self, output, target):
         pass
 
+    @abstractmethod
+    def post_backward(self):
+        """
+        May be used for gradient clipping
+        """
+        pass
+
     def build_models(self):
         self.net: Module = self.get_net_instance(self.upscale_factor).to(self.device)
         self.optimizer = build_optimizer(self._cfg['Optimizer'], self.net.parameters(), self.learning_rate)
@@ -113,7 +115,7 @@ class AbstractCnnSolver(ABC):
         if state['model_name'] != self.name:
             raise Exception("This snapshot is for model " + state['model_name'] + "!")
 
-        self.iteration = state['iteration']
+        # self.iteration = state['iteration']
         self.upscale_factor = state['upscale']
 
         self.net: Module = self.get_net_instance(self.upscale_factor).to(self.device)
@@ -136,10 +138,14 @@ class AbstractCnnSolver(ABC):
             ex_type, ex_inst, ex_tb = exc_info()
             raise ex_type.with_traceback(ex_inst, ex_tb)
 
-        # save model description
-        with open(self.output_folder + "/arch.txt", 'w') as f:
-            f.write(str(self.net) + "\n\n")
-            f.write(getsource(self.net.forward))
+        # copy all python modules found in directory of trained model
+        module_folder = dirname(getfile(self.net.__class__))
+        files = [file for file in listdir(module_folder) if not file.startswith("_") and file.endswith(".py")]
+
+        for file in files:
+            copyfile(join(module_folder, file), join(self.output_folder, file))
+
+        copyfile(join(dirname(module_folder), "abstract_cnn_solver.py"), join(self.output_folder, "abstract_solver.py"))
 
         # save config
         with open(self.output_folder + '/config.ini', 'w') as f:
@@ -151,27 +157,46 @@ class AbstractCnnSolver(ABC):
         self.net.train()
         # TODO: create methods for moving nets and loss to device
         self.net.to(self.device)
-        self.loss.to(self.device)
 
     def train(self, train_set: DataLoader, test_set: DataLoader) -> None:
         self.train_setup()
 
         progress_bar = tqdm(total=self.iter_limit)
 
+        train_values = []
+        loss_component_collector: DefaultDict[str, List] = defaultdict(list)
+
         while self.iteration <= self.iter_limit:
             for _, (labels, data, target) in enumerate(train_set):
+                if len(labels) < self.batch_size:
+                    continue
+
                 data, target = data.to(self.device), target.to(self.device)
 
-                result = self.net(data)
-                loss = self.compute_loss(result, target)
-
-                train_loss = loss.item()
-
                 self.optimizer.zero_grad()
+
+                result = self.net(data)
+                loss, loss_components = self.compute_loss(result, target)
+
+                train_values.append(loss.item())
+                for loss_name, value in loss_components.items():
+                    loss_component_collector[loss_name].append(value)
+
                 loss.backward()
+                self.post_backward()
                 self.optimizer.step()
 
                 self.iteration += 1
+
+                if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+                    self.scheduler.step(loss)
+                    new_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+
+                    if old_lr != new_lr and self.logger:
+                        self.logger.log("LearningRateAdapted")
+                else:
+                    self.scheduler.step()
 
                 # ######## Statistics #########
                 if self.iteration > 0 and self.iteration % self.iter_to_eval == 0:
@@ -185,18 +210,23 @@ class AbstractCnnSolver(ABC):
 
                         self.drawer.save_images(data, result, target, "Train-" + str(self.iteration))
 
-                    (test_loss, _), (psnr, psnr_diff), distances = self.evaluate(test_set)
+                    (test_loss, _), (psnr, psnr_diff, ssim), distances = self.evaluate(test_set)
 
                     if self.logger:
+                        components_line = [f"{k}: {round(np.mean(v), 5):.5f}" for k, v
+                                           in loss_component_collector.items()]
                         line = " ".join([f"Iter:{self.iteration}",
-                                         f"Train_loss:{round(train_loss, 5)}",
+                                         f"Train_loss:{np.round(np.mean(train_values), 5)}",
                                          f"Test_loss:{round(test_loss, 5)}",
                                          f"PSNR:{round(psnr, 5)}",
                                          f"PSNR_diff:{round(psnr_diff, 5)}",
-                                         f"Identity_dist_mean:{round(distances.mean(), 5):.5f}",
-                                         f"Identity_dist_var:{round(distances.var(), 5):.5f}",
-                                         ])
+                                         f"Identity_dist_mean:{round(distances.mean(), 5)}",
+                                         f"Identity_dist_var:{round(distances.var(), 5)}",
+                                         ] + components_line)
                         self.logger.log(line)
+
+                    train_values.clear()
+                    loss_component_collector.clear()
 
                 # snapshot
                 if self.iteration % self.iter_per_snapshot == 0 and self.iteration > 0:
@@ -204,14 +234,6 @@ class AbstractCnnSolver(ABC):
 
                 if self.iteration > self.iter_limit:
                     break
-
-                if isinstance(self.optimizer, optim.lr_scheduler.ReduceLROnPlateau):
-                    old_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
-                    self.scheduler.step(train_loss)
-                    new_lr = self.optimizer.state_dict()['param_groups'][0]['lr']
-
-                    if old_lr != new_lr:
-                        self.logger.log("LearningRateAdapted")
 
                 progress_bar.update()
 
@@ -221,6 +243,7 @@ class AbstractCnnSolver(ABC):
         net_psnr = 0.
         bilinear_psnr = 0.
         test_loss = 0.
+        ssim_val = 0.
         iterations = 0
 
         identity_dists = []
@@ -228,24 +251,29 @@ class AbstractCnnSolver(ABC):
         self.net.eval()
 
         with no_grad():
-            for batch_num, (labels, data, real) in enumerate(test_set):
-                data, real = data.to(self.device), real.to(self.device)
+            for batch_num, (labels, input_img, target_img) in enumerate(test_set):
+                input_img, target_img = input_img.to(self.device), target_img.to(self.device)
 
-                fake = self.net(data)
+                fake_img = self.net(input_img)
 
                 if not identity_only:
-                    test_loss = self.compute_loss(fake, real).item()
-                    mse_loss = self.mse(fake, real).item()
+                    loss, _ = self.compute_loss(fake_img, target_img)
+                    mse_loss = self.mse(fake_img, target_img).item()
                     net_psnr += 10 * log10(1 / mse_loss)
 
-                resized_data = interpolate(data, scale_factor=self.upscale_factor, mode='bilinear', align_corners=True)
-                bilinear_mse_loss = self.mse(resized_data, real).item()
+                    test_loss += loss.item()
+
+                resized_data = interpolate(input_img, scale_factor=self.upscale_factor, mode='bilinear', align_corners=True)
+                bilinear_mse_loss = self.mse(resized_data, target_img).item()
                 bilinear_psnr += 10 * log10(1 / bilinear_mse_loss)
 
                 resized_data = resized_data.cpu().numpy()
+                ssim_val += ssim(tensor(fake_img * 255, dtype=uint8),
+                                 tensor(target_img * 255, dtype=uint8),
+                                 nonnegative_ssim=True).mean()
 
-                for label, res_img, tar_img in zip(labels, fake, real):
-                    target_identity, result_identity = self.identity_extractor(tar_img, res_img)
+                for label, res_img, tar_img in zip(labels, fake_img, target_img):
+                    target_identity, result_identity = self.identity_extractor(label, tar_img, res_img)
 
                     if target_identity is None:
                         continue
@@ -253,10 +281,10 @@ class AbstractCnnSolver(ABC):
                     # TODO: verify for senet
                     # TODO: mtcnn detections
                     identity_dists.append(
-                        self.identity_extractor.identity_dist(label, result_identity, target_identity))
+                        self.identity_extractor.identity_dist(result_identity, target_identity))
 
-                fake = fake.cpu().numpy()
-                real = real.cpu().numpy()
+                fake_img = fake_img.cpu().numpy()
+                target_img = target_img.cpu().numpy()
 
                 iterations += 1
                 if self.test_iter is not None and iterations >= self.test_iter:
@@ -264,19 +292,21 @@ class AbstractCnnSolver(ABC):
 
         self.net.train()
 
+        test_loss /= iterations
         net_psnr /= iterations
         bilinear_psnr /= iterations
+        ssim_val /= iterations
 
         if self.drawer is not None and self.iteration % self.iter_per_image == 0:
-            data = resized_data.transpose((0, 2, 3, 1))
-            fake = fake.transpose((0, 2, 3, 1))
-            real = real.transpose((0, 2, 3, 1))
+            input_img = resized_data.transpose((0, 2, 3, 1))
+            fake_img = fake_img.transpose((0, 2, 3, 1))
+            target_img = target_img.transpose((0, 2, 3, 1))
 
-            self.drawer.save_images(data, fake, real, "Test-" + str(self.iteration))
+            self.drawer.save_images(input_img, fake_img, target_img, "Test-" + str(self.iteration))
 
         # self.net.train()
         return (test_loss, 0.), \
-               (net_psnr, net_psnr - bilinear_psnr), \
+               (net_psnr, net_psnr - bilinear_psnr, ssim_val), \
                np.array(identity_dists)
 
     def test(self):

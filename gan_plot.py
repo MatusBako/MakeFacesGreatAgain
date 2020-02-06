@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from os import listdir
 from os.path import join, dirname, realpath, exists
-from sys import argv
+from sys import stderr
 from typing import Dict, List
 
 
@@ -12,7 +12,6 @@ def get_args():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-l', '--log-path', help='Training log.')
-    parser.add_argument('-a', '--all', action="store_true", help="Redraw all plots of nets in output directory.")
     return parser.parse_args()
 
 
@@ -55,12 +54,15 @@ def transform_lines(lines: Dict[str, List]):
 def parse_log(log):
     lines = {'iter': [], 'gen_train': [], 'gen_test': [], 'disc_train': [], 'disc_test': [], 'psnr': [],
         'diff_psnr': [], 'identity_dist': [], 'pixel_loss': [], 'adv_loss': [], 'feature_loss': []}
-    lr_marks = []
+    disc_lr_marks, gen_lr_marks = [], []
 
     with open(log, 'r') as file:
         for line in file:
-            if line.startswith('LearningRateAdapted'):
-                lr_marks.append(lines['iter'][-1])
+            if line.startswith('DiscriminatorLearningRateAdapted'):
+                disc_lr_marks.append(lines['iter'][-1])
+                continue
+            elif line.startswith('GeneratorLearningRateAdapted'):
+                gen_lr_marks.append(lines['iter'][-1])
                 continue
 
             fields = line.split(" ")
@@ -76,13 +78,12 @@ def parse_log(log):
             lines['pixel_loss'].append(float(fields[8].split(":")[-1]))
             lines['adv_loss'].append(float(fields[9].split(":")[-1]))
             lines['feature_loss'].append(float(fields[10].split(":")[-1]))
-    return lines, lr_marks
+    return lines, disc_lr_marks, gen_lr_marks
 
 
-def make_plot(folder):
-    log = folder + "/log.txt"
-    #    if args.log_path is None else args.log_path
-    lines, lr_marks = parse_log(log)
+def make_plot(log_path):
+    folder = dirname(log_path)
+    lines, disc_lr_marks, gen_lr_marks = parse_log(log_path)
 
     line_width = 1
 
@@ -101,7 +102,7 @@ def make_plot(folder):
     ts_line, = gen_loss_plt.plot(lines['iter'], lines['gen_test'], lw=line_width, label='Test loss')
 
     gen_loss_plt.legend([tr_line, ts_line], ('Train loss', 'Test loss'), loc='upper right')
-    for coord in lr_marks:
+    for coord in gen_lr_marks:
         gen_loss_plt.axvline(x=coord, color='r')
 
     disc_loss_plt.set_title("Trénovacia a testovacia chyba diskriminátoru")
@@ -111,9 +112,8 @@ def make_plot(folder):
     ts_line, = disc_loss_plt.plot(lines['iter'], lines['disc_test'], lw=line_width, label='Test loss')
 
     disc_loss_plt.legend([tr_line, ts_line], ('Train loss', 'Test loss'), loc='upper right')
-    for coord in lr_marks:
+    for coord in disc_lr_marks:
         disc_loss_plt.axvline(x=coord, color='r')
-
 
     psnr_plt.set_title("PSNR")
     psnr_plt.plot(lines['iter'], lines['psnr'], lw=line_width)
@@ -139,13 +139,16 @@ def main():
 
     if args.log_path is None:
         for folder in listdir("outputs"):
-            if args.all or not exists(join("outputs", folder, "plot.png")):
-                folders.append("./outputs/" + folder)
+            if not exists(join("outputs", folder, "plot.png")) and "gan" in folder.lower():
+                folders.append(join("outputs", folder, "log.txt"))
     else:
         folders = [dirname(args.log_path)]
 
     for folder in folders:
-        make_plot(folder)
+        try:
+            make_plot(folder)
+        except Exception as e:
+            print(f"Plotting in folder \"{folder}\" raised error:\n{str(e)}\n", file=stderr)
 
 
 if __name__ == "__main__":

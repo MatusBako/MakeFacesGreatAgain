@@ -14,6 +14,7 @@ def get_config() -> ConfigParser:
     args = parser.parse_args()
 
     config = ConfigParser()
+    config.optionxform = str
     config.read(args.config)
     return config
 
@@ -21,6 +22,7 @@ def get_config() -> ConfigParser:
 def main():
     config = get_config()
     nn_config = config['CNN'] if 'CNN' in config else config['GAN']
+    data_config = config['Dataset']
 
     # dynamically import Solver
     if 'GAN' in config:
@@ -30,10 +32,9 @@ def main():
     solver = Solver(config)
 
     # TODO: dynamically choose dataset loader based on config
-    train_set = DatasetFFHQ(nn_config['TrainData'], nn_config.getint('UpscaleFactor'), length=100)
-    test_set = DatasetFFHQ(nn_config['TestData'], nn_config.getint('UpscaleFactor'), length=100)
-    #train_set = DatasetCelebA(nn_config['TrainDta'], nn_config['UpscaleFactor'])
-    #test_set = DatasetCelebA(nn_config['TestDta'], nn_config['UpscaleFactor'])
+    Dataset = getattr(__import__("datasets", fromlist=[config['Dataset']['Class']]), config['Dataset']['Class'])
+    train_set = Dataset(data_config['TrainData'], nn_config.getint('UpscaleFactor'), length=data_config.getint('TrainLength'))
+    test_set = Dataset(data_config['TestData'], nn_config.getint('UpscaleFactor'), length=data_config.getint('TestLength'))
 
     training_data_loader = DataLoader(dataset=train_set, batch_size=nn_config.getint('BatchSize'), shuffle=True)
     testing_data_loader = DataLoader(dataset=test_set, batch_size=nn_config.getint('BatchSize'), shuffle=True)

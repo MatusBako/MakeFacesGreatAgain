@@ -4,6 +4,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 from os import listdir
 from os.path import exists, join, dirname
+from sys import stderr
 from typing import Dict, List
 
 from sys import argv
@@ -13,7 +14,6 @@ def get_args():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('-l', '--log-path', help='Training log.')
-    parser.add_argument('-a', '--all', action="store_true", help="Redraw all plots of nets in output directory.")
     return parser.parse_args()
 
 
@@ -74,11 +74,11 @@ def parse_log(log):
     return lines, lr_marks
 
 
-def make_plot(folder):
-    log = folder + "/log.txt"
+def make_plot(log_path):
+    fodler = dirname(log_path)
     #    if args.log_path is None else args.log_path
 
-    lines, lr_marks = parse_log(log)
+    lines, lr_marks = parse_log(log_path)
 
     line_width = 1
 
@@ -106,25 +106,27 @@ def make_plot(folder):
     diff_psnr_plt.plot(lines['iter'], lines['diff_psnr'], lw=line_width)
 
     chart_fig.tight_layout()
-    chart_fig.savefig(folder + "/plot.png")
+    chart_fig.savefig(log_path + "/plot.png")
     #chart_fig.show()
 
 
 def main():
     folders = []
 
-
     args = get_args()
 
     if args.log_path is None:
         for folder in listdir("outputs"):
-            if args.all or not exists(join("outputs", folder, "plot.png")):
-                folders.append("./outputs/" + folder)
+            if not exists(join("outputs", folder, "plot.png")) and "gan" not in folder.lower():
+                folders.append(join("outputs", folder, "log.txt"))
     else:
         folders = [dirname(args.log_path)]
 
     for folder in folders:
-        make_plot(folder)
+        try:
+            make_plot(folder)
+        except Exception as e:
+            print(f"Plotting in folder \"{folder}\" raised error:\n{str(e)}\n", file=stderr)
 
     #plt.show()
 
