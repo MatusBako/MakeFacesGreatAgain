@@ -9,7 +9,7 @@ from PIL import Image
 from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop, RandomChoice
 from torchvision.transforms.functional import crop
 
-from .transforms import JpegCompress, AddNoise, MotionBlur, DefocusBlur
+from .transforms import JpegCompress, AddNoise, MotionBlur, DefocusBlur, ColorJitter
 
 from PIL import ImageFile
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -27,8 +27,9 @@ def get_img_size(path):
     return img.size
 
 
-def build_input_transform(h, w, upscale_factor: int):
+def build_input_transform(rng, h, w, upscale_factor: int):
     return Compose([
+        ColorJitter(rng),
         RandomApply([AddNoise()], 0.3),
         RandomChoice([RandomApply([MotionBlur()], 0.3), RandomApply([DefocusBlur()], 0.3)]),
         RandomApply([JpegCompress()], 0.3),
@@ -37,8 +38,9 @@ def build_input_transform(h, w, upscale_factor: int):
     ])
 
 
-def build_target_transform():
+def build_target_transform(rng):
     return Compose([
+        ColorJitter(rng),
         ToTensor(),
     ])
 
@@ -56,15 +58,17 @@ class DatasetFFHQ(data.Dataset):
 
         self.w, self.h = get_img_size(self.image_filenames[0])
 
+        seed = np.random.randint(0, 2 ** 32 - 1)
+
         if input_transform:
             self.input_transform = input_transform
         else:
-            self.input_transform = build_input_transform(self.w, self.h, upscale_factor)
+            self.input_transform = build_input_transform(np.random.RandomState(seed), self.w, self.h, upscale_factor)
 
         if target_transform:
             self.target_transform = target_transform
         else:
-            self.target_transform = build_target_transform()
+            self.target_transform = build_target_transform(np.random.RandomState(seed))
 
     def __getitem__(self, index):
         input_image = self.images[index]

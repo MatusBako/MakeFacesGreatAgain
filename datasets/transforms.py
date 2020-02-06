@@ -4,38 +4,52 @@ import numpy as np
 from numpy.random import RandomState
 from PIL import Image
 from scipy.signal import convolve2d
-from types import LambdaType
 from torchvision.transforms import functional as F, Compose
 
 
 class JpegCompress:
+    def __init__(self, rng=np.random):
+        """
+        np.random.RandomState(rng_seed) can be passed
+        """
+        self.rng = rng
+
     def __call__(self, image):
         out = BytesIO()
-        quality = 95 - int(np.floor(np.clip(np.random.exponential(scale=3), 0, 20)))
+        quality = 95 - int(np.floor(np.clip(self.rng.exponential(scale=3), 0, 20)))
         image.save(out, format='jpeg', quality=quality)
         out.seek(0)
         return Image.open(out)
 
 
 class AddNoise:
+    def __init__(self, rng=np.random):
+        """
+        np.random.RandomState(rng_seed) can be passed
+        """
+        self.rng = rng
+
     def __call__(self, image):
         image = np.array(image, dtype=np.int32)
 
-        noise_range = np.random.randint(1, 3)
-        noise = np.random.normal(0, noise_range, size=image.shape).astype(np.int32)
+        noise_range = self.rng.randint(1, 3)
+        noise = self.rng.normal(0, noise_range, size=image.shape).astype(np.int32)
         return Image.fromarray(np.clip(image + noise, 0, 255).astype(np.uint8))
 
 
 class ColorJitter:
-    def __init__(self, rng_seed, brightness=0.05, contrast=0.05, saturation=0.05, hue=0.05):
-        self.rng = RandomState(rng_seed)
+    def __init__(self, rng=np.random, brightness=0.12, contrast=0.12, saturation=0.12, hue=0.05):
+        """
+        np.random.RandomState(rng_seed) can be passed
+        """
+        self.rng = rng
         self.brightness = brightness
         self.contrast = contrast
         self.saturation = saturation
         self.hue = hue
 
     def __call__(self, img):
-        self.color_jitter(img)
+        return self.color_jitter(img)
 
     # TODO: create color jitter, so that it's possible to get the same deformation twice (use seed for rng)
     # all factors must be passed on call
@@ -53,27 +67,33 @@ class ColorJitter:
             img = F.adjust_saturation(img, saturation_factor)
 
         if self.hue > 0:
-            hue_factor = np.random.uniform(-self.hue, self.hue)
+            hue_factor = self.rng.uniform(-self.hue, self.hue)
             img = F.adjust_hue(img, hue_factor)
         return img
 
 
 class MotionBlur:
+    def __init__(self, rng=np.random):
+        """
+        np.random.RandomState(rng_seed) can be passed
+        """
+        self.rng = rng
+
     def __call__(self, image):
         image = np.array(image)
-        kernel = MotionBlur.get_kernel(resolution=np.random.randint(5, 12))
+
+        kernel = self.get_kernel(resolution=self.rng.randint(5, 12))
 
         for c in range(3):
             image[:, :, c] = convolve2d(image[:, :, c], kernel, mode='same', boundary='wrap')
 
         return Image.fromarray(image)
 
-    @staticmethod
-    def get_kernel(start_samples=500, length=300, halflife=0.5, resolution=15):
+    def get_kernel(self, start_samples=500, length=300, halflife=0.5, resolution=15):
         supersampling = 5
 
         # generate random acceleration
-        a = np.random.randn(2, length + start_samples)
+        a = self.rng.randn(2, length + start_samples)
 
         # integrate speed
         a[0, :] = MotionBlur.ewma(a[0, :], halflife * length)
@@ -174,9 +194,16 @@ class MotionBlur:
 
 
 class DefocusBlur:
+    def __init__(self, rng=np.random):
+        """
+        np.random.RandomState(rng_seed) can be passed
+        """
+        self.rng = rng
+
     def __call__(self, image):
         image = np.array(image)
-        kernel = DefocusBlur.get_kernel(np.random.randint(1, 8), np.random.randint(1, 5))
+
+        kernel = DefocusBlur.get_kernel(self.rng.randint(1, 8), self.rng.randint(1, 5))
 
         for c in range(3):
             image[:, :, c] = convolve2d(image[:, :, c], kernel, mode='same', boundary='wrap')
