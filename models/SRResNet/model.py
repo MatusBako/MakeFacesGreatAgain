@@ -30,7 +30,7 @@ class Net(nn.Module):
         self.conv_input = nn.Conv2d(in_channels=3, out_channels=64, kernel_size=9, padding=4, bias=False)
         self.relu = nn.LeakyReLU(0.2, inplace=True)
         
-        self.residual = self.make_layer(Residual_Block, 4)
+        self.residual = self.make_layer(Residual_Block, 16)
 
         self.conv_mid = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1, bias=False)
         self.bn_mid = nn.InstanceNorm2d(64, affine=True)

@@ -1,19 +1,7 @@
 from torch.nn import MSELoss
 
 from .model import Net
-
-from os.path import dirname, abspath
-from inspect import getframeinfo, currentframe
-from sys import path
-
-try:
-    from ..abstract_cnn_solver import AbstractCnnSolver
-except ValueError:
-    # in case module above isn't in pythonpath
-    script = getframeinfo(currentframe()).filename
-    root_dir = dirname(dirname(dirname(abspath(script))))
-    path.append(root_dir)
-    from models.abstract_cnn_solver import AbstractCnnSolver
+from models.abstract_cnn_solver import AbstractCnnSolver
 
 
 class Solver(AbstractCnnSolver):
@@ -27,6 +15,9 @@ class Solver(AbstractCnnSolver):
     def get_net_instance(self, *args, **kwargs):
         return Net(*args, **kwargs)
 
+    def post_backward(self):
+        pass
+
     @property
     def name(self):
-        return "MFGN4"
+        return "MFGN"

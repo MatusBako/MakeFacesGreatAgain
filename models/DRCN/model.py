@@ -1,75 +1,84 @@
-from math import log2, floor
-from torch import nn, cat, add, ones, sum, mul
-import torch.nn.init as init
-from torch.autograd import Variable
+from torch import nn, cat, ones, sum, tensor, zeros
+
 
 class Net(nn.Module):
-    def __init__(self, upscale_factor, num_channels=3, base_channel=64, s=12, m=4):
+    """
+    Inspired by: https://github.com/togheppi/pytorch-super-resolution-model-collection/blob/master/drcn.py
+    """
+    def __init__(self, upscale_factor, base_channel=64):
         super(Net, self).__init__()
-
-        # Feature extraction
+        self.upscale_factor = upscale_factor
         self.num_recursions = 8
+        input_channel_cnt = 3
+
+        # used for loss computation
+        self.reconstructed = []
+
         # embedding layer
         self.embedding_layer = nn.Sequential(
-            nn.Conv2d(num_channels, base_channel, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(input_channel_cnt, base_channel, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_channel, base_channel, kernel_size=3, stride=1, padding=1),
             nn.ReLU(inplace=True)
         )
 
-        # conv block of inference layer
+        # inference layer
         self.conv_block = nn.Sequential(nn.Conv2d(base_channel, base_channel, kernel_size=3, stride=1, padding=1),
                                         nn.ReLU(inplace=True))
 
         # reconstruction layer
         self.reconstruction_layer = nn.Sequential(
             nn.Conv2d(base_channel, base_channel, kernel_size=3, stride=1, padding=1),
-            nn.Conv2d(base_channel, num_channels, kernel_size=3, stride=1, padding=1)
+            nn.Conv2d(base_channel, input_channel_cnt, kernel_size=3, stride=1, padding=1)
         )
 
-        # initial w
-        self.w_init = ones(self.num_recursions) / self.num_recursions
-        self.w = Variable(self.w_init.cuda(), requires_grad=True)
-
+        self.register_parameter("weight", nn.Parameter(ones(self.num_recursions) / self.num_recursions, requires_grad=True))
         self.weight_init()
 
-    def forward(self, x):
+    def forward(self, x: tensor):
+        x = nn.functional.interpolate(x, scale_factor=self.upscale_factor, mode="bicubic")
+
         # embedding layer
-        h0 = self.embedding_layer(x)
+        init_embedding = self.embedding_layer(x)
 
         # recursions
-        h = [h0]
-        for d in range(self.num_recursions):
-            h.append(self.conv_block(h[d]))
+        infered = [init_embedding]
+        for idx in range(self.num_recursions):
+            infered.append(self.conv_block(infered[idx]))
 
-        y_d_ = []
+        reconstructed = []
         out_sum = 0
-        for d in range(self.num_recursions):
-            y_d_.append(self.reconstruction_layer(h[d + 1]))
-            out_sum += mul(y_d_[d], self.w[d])
-        out_sum = mul(out_sum, 1.0 / (sum(self.w)))
 
-        # skip connection
-        final_out = add(out_sum, x)
+        # iterate all inference levels
+        for idx in range(self.num_recursions):
+            reconstructed.append(self.reconstruction_layer(infered[idx + 1]))
 
-        return y_d_, final_out
+            # each reconstruction is weighted and added to result
+            out_sum += reconstructed[idx] * self.weight[idx]
+        out_sum = out_sum / sum(self.weight)
+
+        # store partial results for loss computation
+        self.reconstructed = reconstructed
+
+        # residual connection
+        return out_sum + x
 
     @staticmethod
     def weights_init_kaiming(m):
         class_name = m.__class__.__name__
-        if class_name.find('Linear') != -1:
+        if 'Linear' in class_name:
             nn.init.kaiming_normal(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
-        elif class_name.find('Conv2d') != -1:
+        elif 'Conv2d' in class_name:
             nn.init.kaiming_normal(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
-        elif class_name.find('ConvTranspose2d') != -1:
+        elif 'ConvTranspose2d' in class_name:
             nn.init.kaiming_normal(m.weight)
             if m.bias is not None:
                 m.bias.data.zero_()
-        elif class_name.find('Norm') != -1:
+        elif 'Norm' in class_name:
             m.weight.data.normal_(1.0, 0.02)
             if m.bias is not None:
                 m.bias.data.zero_()

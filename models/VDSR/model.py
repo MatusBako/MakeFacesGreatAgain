@@ -28,9 +28,10 @@ class Net(nn.Module):
 
         self.output_conv = nn.Conv2d(base_channels, num_channels, kernel_size=3, stride=1, padding=1, bias=False)
 
-    def forward(self, x):
-        print(x.size())
-        residual = x
+    def forward(self, x: Tensor):
+        x = nn.functional.interpolate(x, scale_factor=self.upscale_factor, mode="bicubic")
+
+        residual = x.clone()
         x = self.input_conv(x)
         x = self.residual_layers(x)
         x = self.output_conv(x)

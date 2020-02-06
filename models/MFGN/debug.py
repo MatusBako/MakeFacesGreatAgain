@@ -3,7 +3,7 @@
 from torchvision import models
 from torchsummary import summary
 from torch import device
-#from models.MFGN4 import Net
+#from models.MFGN import Net
 from model import Net
 
 
