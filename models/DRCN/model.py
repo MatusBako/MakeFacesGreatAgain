@@ -36,7 +36,7 @@ class Net(nn.Module):
         self.weight_init()
 
     def forward(self, x: tensor):
-        x = nn.functional.interpolate(x, scale_factor=self.upscale_factor, mode="bicubic")
+        x = nn.functional.interpolate(x, scale_factor=self.upscale_factor, mode="bicubic", align_corners=True)
 
         # embedding layer
         init_embedding = self.embedding_layer(x)

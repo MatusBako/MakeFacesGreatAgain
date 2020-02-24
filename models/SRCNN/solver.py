@@ -11,7 +11,7 @@ class Solver(AbstractCnnSolver):
         self.device = device("cuda" if cuda.is_available() else "cpu")
         self.loss = MSELoss()
 
-    def compute_loss(self, output, target):
+    def compute_loss(self, label, output, target):
         pixel_loss = self.loss(output, target)
 
         components = {

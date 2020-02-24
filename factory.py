@@ -3,7 +3,7 @@ from json import loads
 from torch import optim
 from torch.optim import lr_scheduler
 
-from feature_extractor import DlibFeatureExtractor, senet50_ft
+from feature_extractor import DlibFeatureExtractor, Senet50FeatureExtractor, VggFeatureExtractor
 
 
 def build_optimizer(cfg_section: SectionProxy, net_params, learning_rate):
@@ -26,14 +26,15 @@ def build_scheduler(cfg_section: SectionProxy, optimizer):
     return optim_constr(*args, **kwargs)
 
 
+# TODO: remove, create FE dynamically based on config (=> one layer removed)
 def build_feature_extractor(cfg_section: SectionProxy):
-    name = cfg_section.get('Type')
+    name = cfg_section.get('Type').lower()
 
     if name == "dlib":
         return DlibFeatureExtractor(cfg_section.get('ShapePredictor'), cfg_section.get('Extractor'))
     elif name == "senet":
-        network = senet50_ft(weights_path=cfg_section.get('Snapshot'))
-        network.eval()
-        return network
+        return Senet50FeatureExtractor(cfg_section.get("Detections"), cfg_section.get('Snapshot'))
+    elif name == "vgg":
+        return VggFeatureExtractor(cfg_section.getint("MaxpoolIdx"), cfg_section.getint("NoActivation"))
     else:
         raise Exception("Wrong feature extractor type.")

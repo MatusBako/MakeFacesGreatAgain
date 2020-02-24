@@ -3,17 +3,19 @@ import numpy as np
 
 from configparser import SectionProxy, ConfigParser
 from datetime import datetime
-from inspect import getsource, getframeinfo, currentframe
+from inspect import getsource, getframeinfo, currentframe, getfile
 from numpy import log10
-from os import mkdir
-from os.path import dirname, abspath
+from os import mkdir, listdir
+from os.path import dirname, abspath, join
 from PIL import Image
+from pytorch_msssim import ssim
+from shutil import copyfile
 from sys import exc_info, stderr, path
 from time import time
 from tqdm import tqdm
 from typing import Tuple, Optional
 
-from torch import load, save, no_grad, device, optim, cuda, cat, tensor
+from torch import load, save, no_grad, device, optim, cuda, cat, tensor, uint8
 from torch.nn import MSELoss, Module
 from torch.nn.functional import interpolate
 from torchvision.transforms import Compose, ToTensor, CenterCrop, Resize
@@ -78,7 +80,7 @@ class AbstractGanSolver:
 
             self.identity_extractor = build_feature_extractor(config['FeatureExtractor'])
 
-        self.mse = MSELoss()
+        self.mse_loss = MSELoss()
         # torch.manual_seed(self.seed)
         # torch.cuda.manual_seed(self.seed)
 
@@ -96,11 +98,23 @@ class AbstractGanSolver:
         pass
 
     @abstractmethod
-    def compute_discriminator_loss(self, response, real_img, fake_img, *args, **kwargs):
+    def compute_discriminator_loss(self, fake_img, real_img, precomputed=None, train=True, *args, **kwargs):
         pass
 
     @abstractmethod
-    def compute_generator_loss(self, fake_response, fake_img, real_img, *args, **kwargs):
+    def compute_generator_loss(self, label, fake_img, real_img, precomputed=None, *args, **kwargs):
+        pass
+
+    def post_backward_generator(self):
+        """
+        May be used for gradient clipping
+        """
+        pass
+
+    def post_backward_discriminator(self):
+        """
+        May be used for gradient clipping
+        """
         pass
 
     def build_models(self):
@@ -156,13 +170,13 @@ class AbstractGanSolver:
         if state['model_name'] != self.discriminator_name:
             raise Exception("This snapshot is for model " + state['model_name'] + "!")
 
-        self.iteration = state['iteration']
+        # self.iteration = state['iteration']
         self.upscale_factor = state['upscale']
 
         self.discriminator: Module = self.build_discriminator(self.upscale_factor).to(self.device)
         self.discriminator.load_state_dict(state['model'])
 
-        self.optimizer_disc = build_optimizer(self._cfg['DiscOptimizer'], self.discriminator.parameters,
+        self.optimizer_disc = build_optimizer(self._cfg['DiscOptimizer'], self.discriminator.parameters(),
                                               self.learning_rate_disc)
         self.optimizer_disc.load_state_dict(state['optimizer'])
 
@@ -172,7 +186,7 @@ class AbstractGanSolver:
     def load_generator_model(self, model_path: str):
         state = load(model_path)
 
-        self.iteration = state['iteration']
+        # self.iteration = state['iteration']
         self.upscale_factor = state['upscale']
 
         self.generator = self.build_generator(self.upscale_factor).to(self.device)
@@ -195,13 +209,14 @@ class AbstractGanSolver:
             ex_type, ex_inst, ex_tb = exc_info()
             raise ex_type.with_traceback(ex_inst, ex_tb)
 
-        # save model description
-        for file, attr, loss in (('/arch_gen.txt', self.generator, self.compute_generator_loss),
-                                 ('/arch_disc.txt', self.discriminator, self.compute_discriminator_loss)):
-            with open(self.output_folder + file, 'w') as f:
-                f.write(str(attr) + '\n\n')
-                f.write(getsource(attr.forward) + '\n\n')
-                f.write(getsource(loss))
+        # copy all python modules found in directory of trained model
+        module_folder = dirname(getfile(self.generator.__class__))
+        files = [file for file in listdir(module_folder) if not file.startswith("_") and file.endswith(".py")]
+
+        for file in files:
+            copyfile(join(module_folder, file), join(self.output_folder, file))
+
+        copyfile(join(dirname(module_folder), "abstract_gan_solver.py"), join(self.output_folder, "abstract_solver.py"))
 
         with open(self.output_folder + '/config.ini', 'w') as f:
             self._cfg.write(f)
@@ -220,48 +235,74 @@ class AbstractGanSolver:
 
         progress_bar = tqdm(total=self.iter_limit)
 
+        gen_train_values = []
+        disc_train_values = []
+
         while self.iteration <= self.iter_limit:
             for _, (labels, input_img, target_img) in enumerate(train_set):
+                if len(labels) < self.batch_size:
+                    continue
+
                 # TODO: to incude evaluation or not to
                 # reset timer in case test iterations were executed
-                # progress_bar.last_print_t = time()
+                progress_bar.last_print_t = time()
 
                 input_img, target_img = input_img.to(self.device), target_img.to(self.device)
+
                 fake_img = self.generator(input_img)
-
-                # ######### Train discriminator ########
-                response = self.discriminator(cat((target_img, fake_img)))
-
-                discriminator_train_loss = self.compute_discriminator_loss(response, target_img, fake_img)
-                discriminator_train_loss_value = discriminator_train_loss.item()
-
-                # don't ask why, just keep reading ...
-                discriminator_train_loss.backward(retain_graph=True)
-
-                self.optimizer_disc.step()
-                # TODO: verify if it works also without ReduceLRonPlatau
-                self.scheduler_disc.step(discriminator_train_loss_value)
 
                 # ######## Train generator #########
                 self.optimizer_gen.zero_grad()
 
-                generator_train_loss, log_losses = self.compute_generator_loss(response, fake_img, target_img)
-                generator_train_loss_value = generator_train_loss.item()
+                generator_train_loss, log_losses, precomputed = self.compute_generator_loss(labels, fake_img, target_img)
+                gen_train_values.append(generator_train_loss.item())
 
-                generator_train_loss.backward()
+                generator_train_loss.backward(retain_graph=True)
+                self.post_backward_generator()
                 self.optimizer_gen.step()
-                self.scheduler_gen.step(generator_train_loss_value)
 
-                fake_img, target_img = fake_img.cpu(), target_img.cpu()
+                # ######### Train discriminator ########
+                self.optimizer_disc.zero_grad()
+
+                discriminator_train_loss = self.compute_discriminator_loss(fake_img.detach(), target_img, precomputed)
+                disc_train_values.append(discriminator_train_loss.item())
+
+                # don't ask why, just keep reading ...
+                discriminator_train_loss.backward()
+                self.post_backward_discriminator()
+                self.optimizer_disc.step()
 
                 self.iteration += 1
+                fake_img, target_img = fake_img.cpu(), target_img.cpu()
+
+                # TODO: create function for sched step upfront to avoid more isinstance() calls
+                if isinstance(self.scheduler_gen, optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = self.optimizer_gen.state_dict()['param_groups'][0]['lr']
+                    self.scheduler_gen.step(generator_train_loss)
+                    new_lr = self.optimizer_gen.state_dict()['param_groups'][0]['lr']
+
+                    if old_lr != new_lr and self.logger:
+                        self.logger.log("GeneratorLearningRateAdapted")
+                else:
+                    self.scheduler_gen.step()
+
+                if isinstance(self.scheduler_disc, optim.lr_scheduler.ReduceLROnPlateau):
+                    old_lr = self.optimizer_disc.state_dict()['param_groups'][0]['lr']
+                    self.scheduler_disc.step(discriminator_train_loss)
+                    new_lr = self.optimizer_disc.state_dict()['param_groups'][0]['lr']
+
+                    if old_lr != new_lr and self.logger:
+                        self.logger.log("DiscriminatorLearningRateAdapted")
+                else:
+                    self.scheduler_disc.step()
 
                 # ######## Statistics #########
                 if self.iteration > 0 and self.iteration % self.iter_to_eval == 0:
 
                     # store training collage
                     if self.drawer and self.iteration % self.iter_per_image == 0:
-                        input_img = interpolate(input_img, scale_factor=self.upscale_factor).cpu().numpy().transpose((0, 2, 3, 1))
+                        input_img = interpolate(input_img, scale_factor=self.upscale_factor).cpu().numpy().transpose(
+                            (0, 2, 3, 1))
                         target_img = target_img.cpu().numpy().transpose((0, 2, 3, 1))
                         fake_img = fake_img.detach().cpu().numpy().transpose((0, 2, 3, 1))
 
@@ -270,49 +311,34 @@ class AbstractGanSolver:
                     # TODO: refactor
                     # do we even need PSNR?
                     (generator_test_loss_value, discriminator_test_loss_value), \
-                    (psnr, psnr_diff), distances = self.evaluate(test_set)
+                    (psnr, psnr_diff, ssim_val), distances = self.evaluate(test_set)
 
                     if self.logger:
                         line = " ".join([f"Iter:{self.iteration:}",
-                                         f"Gen_Train_loss:{round(generator_train_loss_value, 5):.5f}",
-                                         f"Disc_Train_loss:{round(discriminator_train_loss_value, 5):.5f}",
+                                         f"Gen_Train_loss:{np.round(np.mean(gen_train_values), 5):.5f}",
+                                         f"Disc_Train_loss:{np.round(np.mean(disc_train_values), 5):.5f}",
                                          f"Gen_Test_loss:{round(generator_test_loss_value, 5):.5f}",
                                          f"Disc_Test_loss:{round(discriminator_test_loss_value, 5):.5f}",
                                          f"PSNR:{round(psnr, 3):.3f}",
                                          f"PSNR_diff:{round(psnr_diff, 3):.3f}",
+                                         f"SSIM:{round(ssim_val, 5)}",
                                          f"Identity_dist_mean:{round(distances.mean(), 5):.5f}",
-                                         f"Identity_dist_var:{round(distances.var(), 5):.5f}",
                                          f"PixelLoss:{log_losses[0]:.7f}",
                                          f"AdvLoss:{log_losses[1]:.7f}",
                                          f"FeatureLoss:{log_losses[2]:.7f}",
                                          ])
                         self.logger.log(line)
 
-                if self.iteration > self.iter_limit:
-                    break
-
+                    gen_train_values.clear()
+                    disc_train_values.clear()
 
                 # snapshot
                 if self.iteration % self.iter_per_snapshot == 0:
                     self.save_generator_model()
                     self.save_discriminator_model()
 
-                # TODO: move to separate method
-                if isinstance(self.optimizer_gen, optim.lr_scheduler.ReduceLROnPlateau):
-                    old_lr = self.optimizer_gen.state_dict()['param_groups'][0]['lr']
-                    self.scheduler_gen.step(generator_train_loss)
-                    new_lr = self.optimizer_gen.state_dict()['param_groups'][0]['lr']
-
-                    if old_lr != new_lr:
-                        self.logger.log("LearningRateAdapted")
-
-                if isinstance(self.optimizer_disc, optim.lr_scheduler.ReduceLROnPlateau):
-                    old_lr = self.optimizer_disc.state_dict()['param_groups'][0]['lr']
-                    self.scheduler_disc.step(generator_train_loss)
-                    new_lr = self.optimizer_disc.state_dict()['param_groups'][0]['lr']
-
-                    if old_lr != new_lr:
-                        self.logger.log("LearningRateAdapted")
+                if self.iteration > self.iter_limit:
+                    break
 
                 progress_bar.update()
 
@@ -324,6 +350,7 @@ class AbstractGanSolver:
 
         net_psnr = 0.
         interpolation_psnr = 0.
+        ssim_val = 0.
 
         generator_loss_value = 0.
         discriminator_loss_value = 0.
@@ -337,30 +364,33 @@ class AbstractGanSolver:
 
         with no_grad():
             # TODO: propagate image path with the image
-            for batch_num, (labels, data, real) in enumerate(test_set):
-                data, real = data.to(self.device), real.to(self.device)
+            for batch_num, (labels, input_img, target_img) in enumerate(test_set):
+                input_img, target_img = input_img.to(self.device), target_img.to(self.device)
 
-                fake = self.generator(data)
-                mse = self.mse(fake, real).item()
+                fake_img = self.generator(input_img)
+                mse = self.mse_loss(fake_img, target_img).item()
                 net_psnr += 10 * log10(1 / mse)
 
                 # Compute discriminator
                 if not identity_only:
-                    response = self.discriminator(cat((real, fake)))
-                    response.to(device('cpu'))
-                    discriminator_loss_value = self.compute_discriminator_loss(response, None, None).item()
+                    fake_response, real_response = self.discriminator(cat((fake_img, target_img))).split(
+                        fake_img.size(0))
+                    # response.to(device('cpu')) # ??
+                    discriminator_loss_value = self.compute_discriminator_loss(fake_img, target_img, train=False).item()
 
                     # ##### Test generator #####
-                    tmp, _ = self.compute_generator_loss(response, fake, real)
+                    tmp, _, _ = self.compute_generator_loss(labels, fake_img, target_img, real_response)
                     generator_loss_value += tmp.item()
 
-                resized_data = interpolate(data, scale_factor=self.upscale_factor, mode='bilinear', align_corners=True)
-                interpolation_loss = self.mse(resized_data, real).item()
+                resized_data = interpolate(input_img, scale_factor=self.upscale_factor, mode='bilinear',
+                                           align_corners=True)
+                interpolation_loss = self.mse_loss(resized_data, target_img).item()
                 interpolation_psnr += 10 * log10(1 / interpolation_loss)
 
                 resized_data = resized_data.cpu().numpy()
 
-                for label, res_img, tar_img in zip(labels, fake, real):
+                # TODO: rewrite so that whole batch can be passed
+                for label, res_img, tar_img in zip(labels, fake_img, target_img):
                     target_identity, result_identity = self.identity_extractor(label, tar_img, res_img)
 
                     if target_identity is None:
@@ -370,8 +400,15 @@ class AbstractGanSolver:
                     # TODO: mtcnn detections
                     identity_dists.append(self.identity_extractor.identity_dist(result_identity, target_identity))
 
-                fake = fake.cpu().numpy()
-                real = real.cpu().numpy()
+                fake_img = fake_img.cpu()
+                target_img = target_img.cpu()
+
+                ssim_val += ssim(tensor(fake_img * 255, dtype=uint8),
+                                 tensor(target_img * 255, dtype=uint8),
+                                 nonnegative_ssim=True).mean()
+
+                fake_img = fake_img.numpy()
+                target_img = target_img.numpy()
 
                 iterations += 1
                 if self.test_iter is not None and iterations % self.test_iter == 0:
@@ -382,6 +419,7 @@ class AbstractGanSolver:
 
         net_psnr /= iterations
         interpolation_psnr /= iterations
+        ssim_val /= iterations
 
         generator_loss_value /= iterations
         discriminator_loss_value /= iterations
@@ -390,14 +428,14 @@ class AbstractGanSolver:
         identity_dist /= iterations * self.batch_size
 
         if self.drawer is not None and self.iteration % self.iter_per_image == 0:
-            data = resized_data.transpose((0, 2, 3, 1))
-            fake = fake.transpose((0, 2, 3, 1))
-            real = real.transpose((0, 2, 3, 1))
+            input_img = resized_data.transpose((0, 2, 3, 1))
+            fake_img = fake_img.transpose((0, 2, 3, 1))
+            target_img = target_img.transpose((0, 2, 3, 1))
 
-            self.drawer.save_images(data, fake, real, "Test-" + str(self.iteration))
+            self.drawer.save_images(input_img, fake_img, target_img, "Test-" + str(self.iteration))
 
         return (generator_loss_value, discriminator_loss_value), \
-               (net_psnr, net_psnr - interpolation_psnr), \
+               (net_psnr, net_psnr - interpolation_psnr, ssim_val), \
                identity_dists
 
     def test(self, test_set: DataLoader):

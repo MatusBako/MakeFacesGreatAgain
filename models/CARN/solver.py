@@ -15,7 +15,7 @@ class Solver(AbstractCnnSolver):
 
         self.loss = MSELoss().to(self.device)
 
-    def compute_loss(self, output, target):
+    def compute_loss(self, label, output, target):
         pixel_loss = self.loss(output, target)
 
         components = {
@@ -26,9 +26,6 @@ class Solver(AbstractCnnSolver):
 
     def get_net_instance(self, *args, **kwargs):
         return Net(*args, **kwargs)
-
-    def post_backward(self):
-        pass
 
     @property
     def name(self):

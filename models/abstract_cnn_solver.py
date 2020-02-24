@@ -80,10 +80,9 @@ class AbstractCnnSolver(ABC):
         pass
 
     @abstractmethod
-    def compute_loss(self, output, target):
+    def compute_loss(self, label, output, target):
         pass
 
-    @abstractmethod
     def post_backward(self):
         """
         May be used for gradient clipping
@@ -176,7 +175,7 @@ class AbstractCnnSolver(ABC):
                 self.optimizer.zero_grad()
 
                 result = self.net(data)
-                loss, loss_components = self.compute_loss(result, target)
+                loss, loss_components = self.compute_loss(labels, result, target)
 
                 train_values.append(loss.item())
                 for loss_name, value in loss_components.items():
@@ -210,7 +209,7 @@ class AbstractCnnSolver(ABC):
 
                         self.drawer.save_images(data, result, target, "Train-" + str(self.iteration))
 
-                    (test_loss, _), (psnr, psnr_diff, ssim), distances = self.evaluate(test_set)
+                    (test_loss, _), (psnr, psnr_diff, ssim_val), distances = self.evaluate(test_set)
 
                     if self.logger:
                         components_line = [f"{k}: {round(np.mean(v), 5):.5f}" for k, v
@@ -220,6 +219,7 @@ class AbstractCnnSolver(ABC):
                                          f"Test_loss:{round(test_loss, 5)}",
                                          f"PSNR:{round(psnr, 5)}",
                                          f"PSNR_diff:{round(psnr_diff, 5)}",
+                                         f"SSIM:{round(ssim_val, 5)}",
                                          f"Identity_dist_mean:{round(distances.mean(), 5)}",
                                          f"Identity_dist_var:{round(distances.var(), 5)}",
                                          ] + components_line)
@@ -257,7 +257,7 @@ class AbstractCnnSolver(ABC):
                 fake_img = self.net(input_img)
 
                 if not identity_only:
-                    loss, _ = self.compute_loss(fake_img, target_img)
+                    loss, _ = self.compute_loss(labels, fake_img, target_img)
                     mse_loss = self.mse(fake_img, target_img).item()
                     net_psnr += 10 * log10(1 / mse_loss)
 
@@ -268,9 +268,6 @@ class AbstractCnnSolver(ABC):
                 bilinear_psnr += 10 * log10(1 / bilinear_mse_loss)
 
                 resized_data = resized_data.cpu().numpy()
-                ssim_val += ssim(tensor(fake_img * 255, dtype=uint8),
-                                 tensor(target_img * 255, dtype=uint8),
-                                 nonnegative_ssim=True).mean()
 
                 for label, res_img, tar_img in zip(labels, fake_img, target_img):
                     target_identity, result_identity = self.identity_extractor(label, tar_img, res_img)
@@ -283,8 +280,13 @@ class AbstractCnnSolver(ABC):
                     identity_dists.append(
                         self.identity_extractor.identity_dist(result_identity, target_identity))
 
-                fake_img = fake_img.cpu().numpy()
-                target_img = target_img.cpu().numpy()
+                fake_img = fake_img.cpu()
+                target_img = target_img.cpu()
+
+                ssim_val += ssim(fake_img, target_img, data_range=1.0, nonnegative_ssim=True).mean().item()
+
+                fake_img = fake_img.numpy()
+                target_img = target_img.numpy()
 
                 iterations += 1
                 if self.test_iter is not None and iterations >= self.test_iter:

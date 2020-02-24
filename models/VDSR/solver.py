@@ -10,7 +10,7 @@ class Solver(AbstractCnnSolver):
         self.loss = MSELoss().to(self.device)
         self.theta = 1e-2
 
-    def compute_loss(self, output, target):
+    def compute_loss(self, label, output, target):
         pixel_loss = self.loss(output, target)
 
         components = {

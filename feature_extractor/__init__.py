@@ -1,2 +1,3 @@
 from .dlib_feature_extractor import DlibFeatureExtractor
-from .senet50_ft_dims_2048 import senet50_ft
+from .senet50_feature_extractor import Senet50FeatureExtractor
+from .vgg_feature_extractor import VggFeatureExtractor

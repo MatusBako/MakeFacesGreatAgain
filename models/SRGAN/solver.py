@@ -26,8 +26,8 @@ class Solver(AbstractGanSolver):
         nn_config = cfg['GAN']
         self.device = nn_config['Device']
 
-        self.mse = MSELoss().to(nn_config['Device'])
-        #self.bce = BCELoss().to(nn_config['Device'])
+        self.mse_loss: MSELoss = MSELoss().to(nn_config['Device'])
+        self.bce_loss = BCELoss().to(nn_config['Device'])
 
         self.feature_extractor = FeatureExtractor().to(nn_config['Device'])
 
@@ -37,8 +37,6 @@ class Solver(AbstractGanSolver):
 
         self.ones_const = ones(self.batch_size, device=nn_config['Device'], requires_grad=False)
         self.zeros_const = zeros(self.batch_size, device=nn_config['Device'], requires_grad=False)
-        self.d_loss_response = cat((ones(self.batch_size, device=nn_config['Device'], requires_grad=False),
-                                    zeros(self.batch_size, device=nn_config['Device'], requires_grad=False)))
 
         self.eps = 1e-8
 
@@ -52,27 +50,30 @@ class Solver(AbstractGanSolver):
     def build_discriminator(self, *args, **kwargs) -> Discriminator:
         return Discriminator()
 
-    def compute_discriminator_loss(self, response: tensor, real_img, fake_img, *args, **kwargs) -> tensor:
-        real_response, fake_response = sigmoid(response).split(response.size(0) // 2)
-        return mean(- log(real_response + self.eps) - log(1 - fake_response + self.eps))
-        #return self.bce(response, self.d_loss_response)
+    def post_backward_generator(self):
+        pass
 
-    def compute_generator_loss(self, response: tensor, fake_img: tensor, real_img: tensor, *args, **kwargs):
-        real_response, fake_response = sigmoid(response).split(response.size(0) // 2)
+    def post_backward_discriminator(self):
+        pass
 
-        # pixel loss not used in this paper
-        # pixel_loss = self.mse(fake_img, real_img)
+    def compute_discriminator_loss(self, fake_img, real_img, precomputed=None, train=True, *args, **kwargs):
+        fake_response = self.discriminator(fake_img)
+        real_response = self.discriminator(real_img)
 
-        # can BCE be used like this?
-        #gen_adv_loss = self.bce(fake_response, self.ones_const)
-        gen_adv_loss = mean(-log(fake_response + self.eps))
+        return (self.bce_loss(fake_response, self.zeros_const) +
+                self.bce_loss(real_response, self.ones_const)) / 2
+        # return self.bce(response, self.d_loss_response)
 
-        fake_features, real_features = self.feature_extractor(cat((fake_img, real_img), 0)).split(real_response.size(0))
+    def compute_generator_loss(self, label, fake_img: tensor, real_img: tensor, precomputed=None, *args, **kwargs):
+        fake_response = self.discriminator(fake_img)
 
-        #feature_content_loss = self.mse(real_features, fake_features)
-        feature_content_loss = self.mse(real_features, fake_features)
+        gen_adv_loss = self.bce_loss(fake_response, self.ones_const)
 
-        #TODO: koeficienty
-        # 0.0000000001 * feature_content_loss, \
-        return 0.01 * gen_adv_loss + 0.0001 * feature_content_loss, \
-            [0, 0.01 * gen_adv_loss.item(), 0.0001 * feature_content_loss.item()]  # 0.0000000001 * feature_content_loss.item()]
+        fake_features = self.feature_extractor(fake_img)
+        real_features = self.feature_extractor(real_img).detach()
+        feature_content_loss = 0.1 * self.mse_loss(fake_features, real_features)
+
+        # TODO: koeficienty
+        return gen_adv_loss + feature_content_loss, \
+               [0, gen_adv_loss.item(), feature_content_loss.item()], \
+               None

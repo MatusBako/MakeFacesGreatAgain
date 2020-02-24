@@ -1,85 +1,114 @@
 import numpy as np
 import pickle
 
-from torch import Tensor, nn
+from torch import Tensor, tensor, empty, zeros, cat, stack, sum, dot, dist
+from torch.nn import Module, MSELoss
+from torch.nn.functional import interpolate
+from torchvision.transforms import CenterCrop
 from typing import Union, Optional, Tuple, Dict
 
 from .senet50_ft_dims_2048 import senet50_ft
 
 
-class Senet50FeatureExtractor:
+class Senet50FeatureExtractor(Module):
     def __init__(self, detections_path, weights_path):
+        super().__init__()
         with open(detections_path, "rb") as f:
             self.detections: Dict[str, Tuple] = pickle.load(f)
 
-        self.extractor: nn.Module = senet50_ft(weights_path)
+        self.extractor: Module = senet50_ft(weights_path).eval()
+        self.register_buffer("mean", tensor((131.0912, 103.8827, 91.4953)).view((3, 1, 1)))
 
-        self.mean = np.array((131.0912, 103.8827, 91.4953)).reshape((1, 1, 3))
+        self.descriptor_shape = 2048
 
-    def _input_transform(self, img: Tensor, img_path):
-        # to use or not to use detection
+    def center_crop(self, img: Tensor, size):
+        img_h, img_w = img.shape[-2:]
 
-        # TODO: get img size
-        im_w = (im_h := 256)
+        l = int(round((img_w - size) / 2.))
+        t = int(round((img_h - size) / 2.))
 
-        l, t, r, b = self.detections[img_path]
-        w = r - l
-        h = b - t
+        return img[:, l:l + size, t:t + size]
 
-        w_extension = w * 1.3 // 2
-        h_extension = h * 1.3 // 2
+    def _input_transform(self, label, img: Tensor, img2: Optional[Tensor] = None):
+        # im_h, im_w = img.shape[-2:]
+        #
+        # if label not in self.detections:
+        #     return None
+        #
+        # # get detection
+        # l, t, r, b = self.detections[label]
+        # w = r - l
+        # h = b - t
+        #
+        # w_extension = int(w * 1.3 // 2)
+        # h_extension = int(h * 1.3 // 2)
+        #
+        # # extend face crop by 1.3
+        # l = l - w_extension if l - w_extension > 0 else 0
+        # r = r + w_extension if r + w_extension < im_w else im_w - 1
+        # t = t - h_extension if t - h_extension > 0 else 0
+        # b = b + h_extension if b + h_extension < im_h else im_h - 1
+        #
+        # # recompute detection size
+        # w = r - l
+        # h = b - t
+        #
+        # # resize detection so that shorter size has 256 pixels
+        # factor = max(256 / w, 256 / h)
+        # img = img[:, t:b, l:r]
+        # img = interpolate(img, scale_factor=factor)
 
-        # extend face crop by 1.3
-        l = l - w_extension if l - w_extension > 0 else 0
-        r = r + w_extension if r + w_extension < im_w else im_w - 1
-        t = t - h_extension if t - h_extension > 0 else 0
-        b = b + h_extension if b + h_extension < im_h else im_h - 1
+        # return center crop of size 224
+        img = self.center_crop(img, 224) - self.mean
 
-        # recompute crop size
-        w = r - l
-        h = b - t
+        if img2 is None:
+            return img
 
-        img = (img * 255).clip(0, 255).astype(np.uint8)
+        # img2 = img2[:, t:b, l:r]
+        # img2 = interpolate(img2, scale_factor=factor)
+        img2 = self.center_crop(img2, 224) - self.mean
+        return img, img2
 
-        # TODO: skontroluj transpoziciu a poradie mean vectoru
-        return np.transpose(img[t:b, l:r], (1, 2, 0))[:, :, ::-1] - self.mean
-
-        # BGR to RGB
-        img = img.cpu().numpy() * 255
-        img = np.transpose(img, (1, 2, 0))[:, :, ::-1]
-        return img.astype(np.uint8)
-
-
-    def __call__(self, label, img: Tensor, img2: Tensor = None, path=None) -> Optional[Union[np.ndarray, Tuple]]:
+    def forward(self, label, img: Tensor, img2: Optional[Tensor] = None) -> Optional[Union[Tensor, Tuple]]:
         """
-        Compute feature descriptor for given image using dlib feature extractor. Uses the same detections from
+        Compute feature descriptor for given image using senet50 feature extractor. Uses the same detections from
         the first image, if two images supplied.
 
         :param label:
         :param img:
         :param img2:
-        :param path: path to image used for getting stored detections
         :return:
         """
 
-        raise NotImplementedError("Need Dataset to also return subpath")
+        batch_size = len(label) if isinstance(label, Tuple) else 1
 
-        # face not detected
-        if path not in self.detections:
-            return None if img2 is None else None, None
+        if batch_size == 1:
+            img = [img]
+            img2 = [img2] if img2 is not None else None
 
-        img = Senet50FeatureExtractor._input_transform(img, path)
+        inputs1 = []
+        inputs2 = []
+
+        for idx, label in enumerate(label):
+            # face not detected
+            if label not in self.detections:
+                continue
+
+            if img2 is None:
+                inputs1.append(self._input_transform(label, img[idx]))
+            else:
+                i1, i2 = self._input_transform(label, img[idx], img2[idx])
+                inputs1.append(i1)
+                inputs2.append(i2)
+
+        batch_size = len(inputs1)
 
         if img2 is None:
-            return np.array(self.extractor(img, face_shape))
+            s = stack(inputs1)
+            return self.extractor(s)[1].view((batch_size, self.descriptor_shape))
 
-        im1_descriptor = np.array(self.extractor(img, face_shape))
-
-        img2 = Senet50FeatureExtractor._input_transform(img2)
-        im2_descriptor = np.array(self.extractor(img2, face_shape))
-
-        return im1_descriptor, im2_descriptor
+        return self.extractor(stack(inputs1))[1], self.extractor(stack(inputs2))[1].detach().view((batch_size, self.descriptor_shape))
 
     @staticmethod
-    def identity_dist(id1: np.ndarray, id2: np.ndarray):
-        return np.sum(id1 ** 2) + np.sum(id2 ** 2) - 2 * np.dot(id1, id2)
+    def identity_dist(id1: Tensor, id2: Tensor):
+        return dist(id1, id2)

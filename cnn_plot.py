@@ -75,7 +75,7 @@ def parse_log(log):
 
 
 def make_plot(log_path):
-    fodler = dirname(log_path)
+    folder = dirname(log_path)
     #    if args.log_path is None else args.log_path
 
     lines, lr_marks = parse_log(log_path)
@@ -106,7 +106,7 @@ def make_plot(log_path):
     diff_psnr_plt.plot(lines['iter'], lines['diff_psnr'], lw=line_width)
 
     chart_fig.tight_layout()
-    chart_fig.savefig(log_path + "/plot.png")
+    chart_fig.savefig(folder + "/plot.png")
     #chart_fig.show()
 
 

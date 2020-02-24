@@ -9,14 +9,11 @@ class Solver(AbstractCnnSolver):
         super().__init__(cfg)
         self.loss = MSELoss()
 
-    def compute_loss(self, output, target):
-        return self.loss(output, target)
+    def compute_loss(self, label, output, target):
+        return self.loss(output, target), {}
 
     def get_net_instance(self, *args, **kwargs):
         return Net(*args, **kwargs)
-
-    def post_backward(self):
-        pass
 
     @property
     def name(self):

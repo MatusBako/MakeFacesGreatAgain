@@ -14,7 +14,7 @@ class Solver(AbstractCnnSolver):
         self.alpha = tensor(0.5, device=self.device)
         self.beta = tensor(0.001, device=self.device)
 
-    def compute_loss(self, output, target):
+    def compute_loss(self, label, output, target):
         # loss1
 
         tmp = tensor(0.)
@@ -36,9 +36,6 @@ class Solver(AbstractCnnSolver):
 
     def get_net_instance(self, *args, **kwargs):
         return Net(*args, **kwargs)
-
-    def post_backward(self):
-        pass
 
     @property
     def name(self):
