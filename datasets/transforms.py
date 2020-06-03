@@ -38,7 +38,7 @@ class AddNoise:
 
 
 class ColorJitter:
-    def __init__(self, rng=np.random, brightness=0.12, contrast=0.12, saturation=0.12, hue=0.05):
+    def __init__(self, rng=np.random, brightness=0.12, contrast=0.12, saturation=0.10, hue=0.04):
         """
         np.random.RandomState(rng_seed) can be passed
         """
@@ -119,12 +119,14 @@ class MotionBlur:
         psf = psf / np.sum(psf)
         return psf
 
-    # ref: https://stackoverflow.com/questions/42869495/numpy-version-of-exponential-weighted-moving-average-equivalent-to-pandas-ewm
     @staticmethod
     def ewma(data, halflife, offset=None, dtype=None, order='C', out=None):
         """
         Calculates the exponential moving average over a vector.
         Will fail for large inputs.
+
+        Source: https://stackoverflow.com/questions/42869495/numpy-version-of-exponential-weighted-moving-average-equivalent-to-pandas-ewm
+
         :param data: Input data
         :param alpha: scalar float in range (0,1)
             The alpha parameter for the moving average.
@@ -199,11 +201,13 @@ class DefocusBlur:
         np.random.RandomState(rng_seed) can be passed
         """
         self.rng = rng
+        self.max_scale = 8
+        self.max_radius = 5
 
     def __call__(self, image):
         image = np.array(image)
 
-        kernel = DefocusBlur.get_kernel(self.rng.randint(1, 8), self.rng.randint(1, 5))
+        kernel = DefocusBlur.get_kernel(self.rng.randint(1, self.max_scale), self.rng.randint(1, self.max_radius))
 
         for c in range(3):
             image[:, :, c] = convolve2d(image[:, :, c], kernel, mode='same', boundary='wrap')

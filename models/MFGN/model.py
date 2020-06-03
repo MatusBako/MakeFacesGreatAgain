@@ -1,88 +1,92 @@
 from math import log2, floor
-from torch import nn, cat, add, Tensor
-from torch.nn import init, Upsample, Conv2d, ReLU, AvgPool2d, BatchNorm2d, Sequential, LeakyReLU
+from torch import nn, cat, add, tensor
+from torch.nn import init, Upsample, Conv2d, ReLU, AvgPool2d, BatchNorm2d, Sequential, LeakyReLU, InstanceNorm2d
 from torch.nn.functional import interpolate
 
 
 class ScaleLayer(nn.Module):
     def __init__(self, init_value=1e-3):
         super().__init__()
-        self.scale = nn.Parameter(Tensor([init_value]), requires_grad=True)
+        self.scale = nn.Parameter(tensor([init_value]), requires_grad=True)
 
     def forward(self, data):
         return data * self.scale
 
-
-class ResidualBlock(nn.Module):
-    def __init__(self):
-        super(ResidualBlock, self).__init__()
-
-        self.block = Sequential(
-            LeakyReLU(0.2, inplace=True),
-            Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1, bias=False),
-            LeakyReLU(0.2, inplace=True),
-            Conv2d(in_channels=64, out_channels=64, kernel_size=3, padding=1, bias=False),
-            ScaleLayer()
-        )
-
-    def forward(self, x):
-        output = self.block(x)
-        return add(output, x)
-
-
 class Net(nn.Module):
-    def __init__(self, upscale_factor: int, num_channels=3):
-        super(Net, self).__init__()
-        self.upscale_factor = upscale_factor
+    def __init__(self, scale_factor, input_channels=3):
+        super().__init__()
 
-        self.d1 = nn.Sequential(
-            Conv2d(num_channels, 64, kernel_size=5, stride=1, padding=2),
-            ResidualBlock(),
-            ResidualBlock(),
-            ResidualBlock(),
-            ResidualBlock()
-        )
+        assert log2(scale_factor).is_integer(), "Scale factor must be power of two"
+        self.scale_factor = scale_factor
 
-        self.pool1 = AvgPool2d(2, 2)
+        n_channels = 24
+        group_size = 6
 
-        self.d2 = nn.Sequential(
-            ResidualBlock(),
-            ResidualBlock(),
-            ResidualBlock(),
-            ResidualBlock()
-        )
+        start = [nn.Conv2d(input_channels, n_channels, kernel_size=5, stride=1, padding=2)] + \
+                [ResResDenseBlock(n_channels) for _ in range(group_size)]
+        self.start = nn.Sequential(*start)
 
-        self.u1 = nn.Sequential(
+        middle = [nn.AvgPool2d(2, 2)] + [ResResDenseBlock(n_channels) for _ in range(group_size)]
+        self.middle = nn.Sequential(*middle)
 
-            ResidualBlock(),
-            ResidualBlock(),
-            ResidualBlock(),
-            ResidualBlock(),
-            Conv2d(64, num_channels * (upscale_factor ** 2), kernel_size=3, stride=1, padding=1),
-            nn.PixelShuffle(upscale_factor)
-        )
+        end = [ResResDenseBlock(n_channels) for _ in range(group_size)]
+        self.end = nn.Sequential(*end)
 
-        self.out_conv = Conv2d(3, 3, kernel_size=3, stride=1, padding=1)
+        upsample = [UpsampleBLock(n_channels, 2)] * int(log2(scale_factor)) \
+                   + [nn.Conv2d(n_channels, input_channels, kernel_size=3, padding=1)]
+        self.upsample = nn.Sequential(*upsample)
 
-        #self.scale = ScaleLayer()
-        #self._initialize_weights()
-
-        # avgpool, upsample
-
-    def _initialize_weights(self):
-        for layer in self.layers[:-1]:
-            init.orthogonal_(layer.weight, init.calculate_gain('relu'))
-
-        #init.orthogonal_(self.layer[-1].weight)
+        self.out_conv = nn.Conv2d(input_channels, input_channels, kernel_size=3, padding=1)
 
     def forward(self, x):
-        c1 = self.d1(x)
+        preprocessed = self.start(x)
 
-        c2 = self.pool1(c1)
-        c2 = self.d2(c2)
+        downsampled = self.middle(preprocessed)
 
-        c3 = add(c1, interpolate(c2, scale_factor=2))
-        c3 = self.u1(c3)
-        out = add(interpolate(x, scale_factor=self.upscale_factor), c3)
+        c3 = preprocessed + nn.functional.interpolate(downsampled, scale_factor=2)
+        c3 = self.end(c3)
+        out = self.upsample(c3) + nn.functional.interpolate(x, scale_factor=self.scale_factor)
+        return self.out_conv(out)
 
-        return out
+
+class ResResDenseBlock(nn.Module):
+    def __init__(self, n_channels: int):
+        super().__init__()
+
+        convs = [
+            nn.Sequential(
+                nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1),
+                nn.LeakyReLU()
+            )
+            if i != 5
+            else nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1)
+            for i in range(1, 6)]
+        self.convs = nn.Sequential(*convs)
+
+        # self.scale = nn.Parameter(tensor(1e-3), requires_grad=True)
+        self.scale = nn.Parameter(tensor([1e-3 for _ in range(n_channels)]).view(1, n_channels, 1, 1), requires_grad=True)
+
+    def forward(self, x):
+        last = None
+        inputs = x
+
+        for idx, conv in enumerate(self.convs):
+            last = conv(inputs)
+
+            if idx < len(self.convs) - 1:
+                inputs = cat((inputs, last), dim=1)
+        return x + self.scale * last
+
+
+class UpsampleBLock(nn.Module):
+    def __init__(self, in_channels, up_scale):
+        super(UpsampleBLock, self).__init__()
+        self.conv = nn.Conv2d(in_channels, in_channels * up_scale ** 2, kernel_size=3, padding=1)
+        self.pixel_shuffle = nn.PixelShuffle(up_scale)
+        self.prelu = nn.PReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.pixel_shuffle(x)
+        x = self.prelu(x)
+        return x

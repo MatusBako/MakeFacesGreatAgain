@@ -6,8 +6,8 @@ from models.abstract_cnn_solver import AbstractCnnSolver
 
 
 class Solver(AbstractCnnSolver):
-    def __init__(self, cfg=None):
-        super().__init__(cfg)
+    def __init__(self, cfg, *args, **kwargs):
+        super().__init__(cfg, *args, **kwargs)
         self.device = device("cuda" if cuda.is_available() else "cpu")
         self.loss = MSELoss()
 

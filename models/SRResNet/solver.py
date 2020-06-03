@@ -5,8 +5,8 @@ from models.abstract_cnn_solver import AbstractCnnSolver
 
 
 class Solver(AbstractCnnSolver):
-    def __init__(self, cfg=None):
-        super().__init__(cfg)
+    def __init__(self, cfg, *args, **kwargs):
+        super().__init__(cfg, *args, **kwargs)
         self.loss = MSELoss()
 
     def compute_loss(self, label, output, target):

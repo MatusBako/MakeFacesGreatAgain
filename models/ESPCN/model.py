@@ -31,17 +31,6 @@ class Net(nn.Module):
         self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
 
         #self.scale = ScaleLayer()
-        #self._initialize_weights()
-
-    def _initialize_weights(self):
-        '''for layer in self.layers[:-1]:
-            init.orthogonal_(layer.weight, init.calculate_gain('relu'))
-
-        init.orthogonal_(self.layer[-1].weight)'''
-
-        def weight_init(self, mean, std):
-            for m in self._modules:
-                normal_init(self._modules[m], mean, std)
 
     def forward(self, x):
         c1 = self.conv1(x)

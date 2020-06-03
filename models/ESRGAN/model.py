@@ -1,6 +1,6 @@
 from math import log2
 from torch import nn, tanh, sigmoid, add, cat, tensor
-from torchvision.models import vgg19
+from torchvision.models import vgg19, vgg13
 
 
 class Generator(nn.Module):
@@ -37,9 +37,10 @@ class Generator(nn.Module):
 
 # TODO: hourglass architecture
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, input_size=256):
         super(Discriminator, self).__init__()
-        self.net = nn.Sequential(
+
+        convs = [
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
 
@@ -66,38 +67,56 @@ class Discriminator(nn.Module):
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.LeakyReLU(0.2, inplace=True),
+        ]
 
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(512, 1024, kernel_size=1),
+        # - 3 for 3 downsamples, -1 for output to be 512x2x2
+        for i in range(int(log2(input_size)) - 3 - 1):
+            convs.extend([
+                nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1),
+                nn.BatchNorm2d(512),
+                nn.LeakyReLU(0.2, inplace=True),
+            ]
+            )
+
+        self.convs = nn.Sequential(*convs)
+
+        self.fc = nn.Sequential(
+            nn.Linear(2048, 1024),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(1024, 1, kernel_size=1)
+            nn.Linear(1024, 1),
         )
 
     def forward(self, x):
-        batch_size = x.size(0)
-        return self.net(x).view(batch_size)
+        conv = self.convs(x)
+        map = self.fc(conv.view(x.size(0), -1))
+        return map.view(x.size(0))
 
 
 class ResResDenseBlock(nn.Module):
     def __init__(self, n_channels: int):
         super().__init__()
 
-        self.convs = [nn.Sequential(
-                    nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1),
-                    nn.LeakyReLU()
-                    ) if i != 5 else nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1)
-                    for i in range(1, 6)]
+        self.convs = [
+            nn.Sequential(
+                nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1),
+                nn.LeakyReLU()
+            )
+            if i != 5
+            else nn.Conv2d(i * n_channels, n_channels, kernel_size=3, padding=1)
+            for i in range(1, 6)]
         self.convs = nn.Sequential(*self.convs)
         self.scale = ScaleLayer()
 
     def forward(self, x):
-        last = x
+        last = None
         inputs = x
 
-        for conv in self.convs:
+        for idx, conv in enumerate(self.convs):
             last = conv(inputs)
-            inputs = cat((inputs, last), dim=1)
-        return add(x, self.scale(last))
+
+            if idx < len(self.convs) - 1:
+                inputs = cat((inputs, last), dim=1)
+        return x + self.scale(last)
 
 
 class ScaleLayer(nn.Module):
@@ -124,28 +143,33 @@ class UpsampleBLock(nn.Module):
 
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, maxpool_idx=2, no_activation=True):
+    def __init__(self, maxpool_idx=1, skip_n_last_layers=2):
         """
         Used for computing perception loss (MSE over activations)
 
         :param maxpool_idx: either 1 or 4
-        :param no_activation: flag if last activation is included
+        :param skip_n_last_layers: useful for skipping maxpool and activation
         """
         super(FeatureExtractor, self).__init__()
 
-        children = list(vgg19(pretrained=True).children())[0]
+        children = vgg19(pretrained=True).features
         max_pool_indices = [index for index, layer in enumerate(children) if isinstance(layer, nn.MaxPool2d)]
 
         # get all layers up to chosen maxpool layer
         maxpool_idx = max_pool_indices[maxpool_idx]
-        layers = children[:maxpool_idx - int(no_activation)]
+
+        # skip maxpooling and activation
+        if skip_n_last_layers > 0:
+            maxpool_idx -= skip_n_last_layers
+
+        layers = children[:maxpool_idx]
         self.features = nn.Sequential(*layers).requires_grad_(False).eval()
 
         self.register_buffer("mean_val", tensor([0.485, 0.456, 0.406]).view((1, 3, 1, 1)))
         self.register_buffer("std_val", tensor([0.229, 0.224, 0.225]).view((1, 3, 1, 1)))
 
     def preprocess(self, x):
-        return (x - self.mean_val) * self.std_val
+        return (x - self.mean_val) / self.std_val
 
     def forward(self, x):
         return self.features(self.preprocess(x))

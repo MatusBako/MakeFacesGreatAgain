@@ -1,36 +1,36 @@
-import dlib
 import numpy as np
 
 from abc import ABC, abstractmethod
 from configparser import ConfigParser, SectionProxy
 from collections import defaultdict
 from datetime import datetime
-from inspect import getsource, getframeinfo, currentframe, getfile
+from inspect import getfile
 from numpy import log10
 from os import mkdir, listdir
-from os.path import dirname, abspath, join
+from os.path import dirname, join
 from PIL import Image
 from pytorch_msssim import ssim
 from shutil import copyfile
-from sys import exc_info, stderr, path
+from sys import exc_info, stderr
 from time import time
 from tqdm import tqdm
-from typing import Tuple, Optional, DefaultDict, List
+from typing import Tuple, DefaultDict, List
 
-from torch import load, save, no_grad, device, optim, cuda, tensor, uint8
+from torch import load, save, no_grad, device, optim
 from torch.nn import MSELoss, Module
 from torch.nn.functional import interpolate
-from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop
+from torchvision.transforms import Compose, ToTensor
 from torch.utils.data import DataLoader
 
-from factory import build_feature_extractor, build_scheduler, build_optimizer
+from utils.factory import build_feature_extractor, build_scheduler, build_optimizer
 from utils import Drawer, Logger
 
 
 class AbstractCnnSolver(ABC):
-    def __init__(self, config: ConfigParser = None):
+    def __init__(self, config: ConfigParser, mode="train"):
+        self._cfg = config
 
-        self.iteration = 0
+        self.device = 'cuda'
         self.learning_rate = None
         self.net = None
         self.optimizer = None
@@ -39,19 +39,15 @@ class AbstractCnnSolver(ABC):
         self.output_folder = None
         self.drawer = None
         self.logger = None
-        self._cfg = None
         self.test_iter = None
-        self.upscale_factor = None
 
-        self.device = device("cuda" if cuda.is_available() else "cpu")
-
-        if config is not None:
-            self._cfg = config
+        if mode == "train":
             nn_cfg: SectionProxy = config["CNN"]
-
             self.device = device(nn_cfg['Device'])
-            self.batch_size = nn_cfg.getint('BatchSize')
             self.upscale_factor = nn_cfg.getint('UpscaleFactor')
+
+            self.iteration = 0
+            self.batch_size = nn_cfg.getint('BatchSize')
             self.learning_rate = nn_cfg.getfloat('LearningRate')
 
             self.iter_limit = nn_cfg.getint('IterationLimit')
@@ -60,12 +56,21 @@ class AbstractCnnSolver(ABC):
             self.iter_to_eval = nn_cfg.getint('IterationsToEvaluation')
             self.test_iter = nn_cfg.getint('EvaluationIterations')
 
-            timestamp = str(datetime.fromtimestamp(time()).strftime('%Y.%m.%d-%H:%M:%S'))
-            self.output_folder = nn_cfg['OutputFolder'] + "/" + self.name + "-" + timestamp
+            if 'OutputFolder' in nn_cfg:
+                timestamp = str(datetime.fromtimestamp(time()).strftime('%Y.%m.%d-%H%M%S'))
+                self.output_folder = nn_cfg['OutputFolder'] + "/" + self.name + "-" + timestamp
 
             self.identity_extractor = build_feature_extractor(config['FeatureExtractor'])
+            self.mse = MSELoss().to(self.device)
 
-        self.mse = MSELoss()
+        elif mode == "eval":
+            self.mse = MSELoss().to(self.device)
+            self.identity_extractor = build_feature_extractor(config['FeatureExtractor'])
+
+        elif mode == "single":
+            ...
+        else:
+            raise Exception(f"Wrong mode \"{mode}\"!")
 
         # torch.manual_seed(self.seed)
         # torch.cuda.manual_seed(self.seed)
@@ -108,7 +113,7 @@ class AbstractCnnSolver(ABC):
         save(dic, checkpoint_path)
         self.net.to(self.device)
 
-    def load_model(self, model_path: str):
+    def load_model(self, model_path: str, mode="train"):
         state = load(model_path)
 
         if state['model_name'] != self.name:
@@ -120,38 +125,43 @@ class AbstractCnnSolver(ABC):
         self.net: Module = self.get_net_instance(self.upscale_factor).to(self.device)
         self.net.load_state_dict(state['model'])
 
-        self.optimizer = build_optimizer(self._cfg['Optimizer'], self.net.parameters(), self.learning_rate)
-        self.optimizer.load_state_dict(state['optimizer'])
+        if mode == "train":
+            self.optimizer = build_optimizer(self._cfg['Optimizer'], self.net.parameters(), self.learning_rate)
+            self.optimizer.load_state_dict(state['optimizer'])
 
-        self.scheduler = build_scheduler(self._cfg['Scheduler'], self.optimizer)
-        self.scheduler.load_state_dict(state['scheduler'])
+            self.scheduler = build_scheduler(self._cfg['Scheduler'], self.optimizer)
+            self.scheduler.load_state_dict(state['scheduler'])
 
     def train_setup(self) -> None:
         assert self._cfg is not None, "Create solver with config to train!"
+        src_subfolder = "src"
 
-        # create output folder
-        try:
-            mkdir(self.output_folder)
-        except Exception:
-            print("Can't create output folder!", file=stderr)
-            ex_type, ex_inst, ex_tb = exc_info()
-            raise ex_type.with_traceback(ex_inst, ex_tb)
+        if self.output_folder is not None:
+            # create output folder
+            try:
+                mkdir(self.output_folder)
+                mkdir(join(self.output_folder, src_subfolder))
+            except Exception:
+                print("Can't create output folder!", file=stderr)
+                ex_type, ex_inst, ex_tb = exc_info()
+                raise ex_type.with_traceback(ex_inst, ex_tb)
 
-        # copy all python modules found in directory of trained model
-        module_folder = dirname(getfile(self.net.__class__))
-        files = [file for file in listdir(module_folder) if not file.startswith("_") and file.endswith(".py")]
+            # copy all python modules found in directory of trained model
+            module_folder = dirname(getfile(self.net.__class__))
+            files = [file for file in listdir(module_folder) if file.endswith(".py")]
 
-        for file in files:
-            copyfile(join(module_folder, file), join(self.output_folder, file))
+            for file in files:
+                copyfile(join(module_folder, file), join(self.output_folder, src_subfolder, file))
 
-        copyfile(join(dirname(module_folder), "abstract_cnn_solver.py"), join(self.output_folder, "abstract_solver.py"))
+            copyfile(join(dirname(module_folder), "abstract_cnn_solver.py"),
+                     join(self.output_folder, "abstract_solver.py"))
 
-        # save config
-        with open(self.output_folder + '/config.ini', 'w') as f:
-            self._cfg.write(f)
+            # save config
+            with open(self.output_folder + '/config.ini', 'w') as f:
+                self._cfg.write(f)
 
-        self.drawer = Drawer(self.output_folder, scale_factor=self.upscale_factor)
-        self.logger = Logger(self.output_folder)
+            self.drawer = Drawer(self.output_folder, scale_factor=self.upscale_factor)
+            self.logger = Logger(self.output_folder)
 
         self.net.train()
         # TODO: create methods for moving nets and loss to device
@@ -167,7 +177,7 @@ class AbstractCnnSolver(ABC):
 
         while self.iteration <= self.iter_limit:
             for _, (labels, data, target) in enumerate(train_set):
-                if len(labels) < self.batch_size:
+                if len(labels) < train_set.batch_size:
                     continue
 
                 data, target = data.to(self.device), target.to(self.device)
@@ -212,7 +222,7 @@ class AbstractCnnSolver(ABC):
                     (test_loss, _), (psnr, psnr_diff, ssim_val), distances = self.evaluate(test_set)
 
                     if self.logger:
-                        components_line = [f"{k}: {round(np.mean(v), 5):.5f}" for k, v
+                        components_line = [f"{k}:{round(np.mean(v), 5):.5f}" for k, v
                                            in loss_component_collector.items()]
                         line = " ".join([f"Iter:{self.iteration}",
                                          f"Train_loss:{np.round(np.mean(train_values), 5)}",
@@ -221,7 +231,6 @@ class AbstractCnnSolver(ABC):
                                          f"PSNR_diff:{round(psnr_diff, 5)}",
                                          f"SSIM:{round(ssim_val, 5)}",
                                          f"Identity_dist_mean:{round(distances.mean(), 5)}",
-                                         f"Identity_dist_var:{round(distances.var(), 5)}",
                                          ] + components_line)
                         self.logger.log(line)
 
@@ -263,7 +272,8 @@ class AbstractCnnSolver(ABC):
 
                     test_loss += loss.item()
 
-                resized_data = interpolate(input_img, scale_factor=self.upscale_factor, mode='bilinear', align_corners=True)
+                resized_data = interpolate(input_img, scale_factor=self.upscale_factor, mode='bilinear',
+                                           align_corners=True)
                 bilinear_mse_loss = self.mse(resized_data, target_img).item()
                 bilinear_psnr += 10 * log10(1 / bilinear_mse_loss)
 

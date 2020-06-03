@@ -1,5 +1,5 @@
 from configparser import SectionProxy
-from torch.nn import MSELoss
+from torch.nn import MSELoss, L1Loss
 
 from .model import Net
 
@@ -7,13 +7,18 @@ from models.abstract_cnn_solver import AbstractCnnSolver
 
 
 class Solver(AbstractCnnSolver):
-    def __init__(self, cfg=None):
-        super().__init__(cfg)
+    def __init__(self, cfg=None, mode="train"):
+        super().__init__(cfg, mode)
 
-        nn_config: SectionProxy = cfg['CNN']
-        self.device = nn_config['Device']
+        if mode == "train":
+            nn_config: SectionProxy = cfg['CNN']
+            self.device = nn_config['Device']
 
-        self.loss = MSELoss().to(self.device)
+            self.loss = MSELoss().to(self.device)
+        elif mode == "single":
+            pass
+        else:
+            raise Exception(f"Wrong mode \"{mode}\"!")
 
     def compute_loss(self, label, output, target):
         pixel_loss = self.loss(output, target)

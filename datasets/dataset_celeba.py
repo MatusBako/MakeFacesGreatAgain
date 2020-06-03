@@ -26,7 +26,7 @@ def get_img_size(path):
 
 def build_input_transform(rng, h, w, upscale_factor):
     return Compose([
-        # ColorJitter(rng),
+        ColorJitter(rng),
         CenterCrop((208, 176)),
         RandomApply([AddNoise()], 0.3),
         RandomChoice([RandomApply([MotionBlur()], 0.3), RandomApply([DefocusBlur()], 0.3)]),
@@ -38,7 +38,7 @@ def build_input_transform(rng, h, w, upscale_factor):
 
 def build_target_transform(rng):
     return Compose([
-        # ColorJitter(rng),
+        ColorJitter(rng),
         CenterCrop((208, 176)),
         ToTensor(),
     ])
@@ -61,14 +61,13 @@ class DatasetCelebA(data.Dataset):
 
         seed = np.random.randint(0, 2 ** 32 - 1)
 
-        if input_transform:
+        if input_transform is not None and target_transform is not None:
             self.input_transform = input_transform
-        else:
-            self.input_transform = build_input_transform(np.random.RandomState(seed), 208, 176, upscale_factor)
-
-        if target_transform:
             self.target_transform = target_transform
+        elif input_transform is not None or target_transform is not None:
+            assert False, "Both or neither input transformations must be set."
         else:
+            self.input_transform = build_input_transform(np.random.RandomState(seed), self.w, self.h, upscale_factor)
             self.target_transform = build_target_transform(np.random.RandomState(seed))
 
     def __getitem__(self, index):

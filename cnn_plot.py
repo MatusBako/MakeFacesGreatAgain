@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
-from matplotlib import pyplot as plt
 import numpy as np
+
+from collections import defaultdict
+from matplotlib import pyplot as plt
 from os import listdir
 from os.path import exists, join, dirname
 from sys import stderr
@@ -38,23 +40,36 @@ def transform_lines(lines: Dict[str, List]):
         else:
             raise Exception("Unexpected value type!")
 
-        # leave out few last values, so that each point in plot
-        # averages the same number of values
-        if leftovers:
-            arr = np.array(arr[:-leftovers]).reshape((-1, values_per_point))
-        else:
-            arr = np.array(arr).reshape((-1, values_per_point))
+        # # leave out few last values, so that each point in plot
+        # # averages the same number of values
+        # if leftovers:
+        #     arr = np.array(arr[:-leftovers]).reshape((-1, values_per_point))
+        # else:
+        #     arr = np.array(arr).reshape((-1, values_per_point))
+
+        # if key == 'iter':
+        #     lines[key] = arr.max(axis=1)
+        # else:
+        #     lines[key] = np.average(arr, axis=1)
 
         if key == 'iter':
-            lines[key] = arr.max(axis=1)
+            lines[key] = arr[::values_per_point]
         else:
-            lines[key] = np.average(arr, axis=1)
+            kernel_size = 20
+            kernel_size += 1 - kernel_size % 2
+
+            kernel = np.ones(kernel_size) / kernel_size
+
+            arr = np.pad(arr, pad_width=((kernel_size // 2, kernel_size // 2),), mode='edge')
+            arr = np.convolve(arr, kernel, mode="valid")
+
+            lines[key] = arr[::values_per_point]
 
     return lines
 
 
 def parse_log(log):
-    lines = {'iter': [], 'train': [], 'test': [], 'psnr': [], 'diff_psnr': [], 'identity_dist': []}
+    lines = defaultdict(list)
     lr_marks = []
 
     with open(log, 'r') as file:
@@ -70,7 +85,12 @@ def parse_log(log):
             lines['test'].append(float(fields[2].split(":")[-1]))
             lines['psnr'].append(float(fields[3].split(":")[-1]))
             lines['diff_psnr'].append(float(fields[4].split(":")[-1]))
-            lines['identity_dist'].append(float(fields[5].split(":")[-1]))
+            lines['ssim'].append(float(fields[5].split(":")[-1]))
+            lines['identity_dist'].append(float(fields[6].split(":")[-1]))
+
+            for i in range(7, len(fields)):
+                k, v = fields[i].split(":")
+                lines[k].append(float(v))
     return lines, lr_marks
 
 
@@ -87,7 +107,7 @@ def make_plot(log_path):
 
     lines = transform_lines(lines)
 
-    chart_fig, (loss_plt, psnr_plt, diff_psnr_plt) = plt.subplots(3)
+    chart_fig, (loss_plt, psnr_plt, diff_psnr_plt, ssim_plt) = plt.subplots(4, dpi=120, figsize=(6.4, 6))
     loss_plt.set_title("Trénovacia a testovacia chyba")
     #tr_line, = loss_plt.semilogy(lines['iter'], lines['train'], lw=line_width, label='Train loss')
     #ts_line, = loss_plt.semilogy(lines['iter'], lines['test'], lw=line_width, label='Test loss')
@@ -105,6 +125,10 @@ def make_plot(log_path):
     diff_psnr_plt.set_title("Zlepšenie PSNR voči bil.")
     diff_psnr_plt.plot(lines['iter'], lines['diff_psnr'], lw=line_width)
 
+    ssim_plt.set_title("SSIM")
+    ssim_plt.plot(lines['iter'], lines['ssim'], lw=line_width)
+    # ssim_plt.set_ylim((0, 1))
+
     chart_fig.tight_layout()
     chart_fig.savefig(folder + "/plot.png")
     #chart_fig.show()
@@ -120,13 +144,13 @@ def main():
             if not exists(join("outputs", folder, "plot.png")) and "gan" not in folder.lower():
                 folders.append(join("outputs", folder, "log.txt"))
     else:
-        folders = [dirname(args.log_path)]
+        folders = [args.log_path]
 
     for folder in folders:
-        try:
-            make_plot(folder)
-        except Exception as e:
-            print(f"Plotting in folder \"{folder}\" raised error:\n{str(e)}\n", file=stderr)
+        # try:
+        make_plot(folder)
+        # except Exception as e:
+        #     print(f"Plotting in folder \"{folder}\" raised error:\n{str(e)}\n", file=stderr)
 
     #plt.show()
 

@@ -36,8 +36,8 @@ def main():
     train_set = Dataset(data_config['TrainData'], nn_config.getint('UpscaleFactor'), length=data_config.getint('TrainLength'))
     test_set = Dataset(data_config['TestData'], nn_config.getint('UpscaleFactor'), length=data_config.getint('TestLength'))
 
-    training_data_loader = DataLoader(dataset=train_set, batch_size=nn_config.getint('BatchSize'), shuffle=True)
-    testing_data_loader = DataLoader(dataset=test_set, batch_size=nn_config.getint('BatchSize'), shuffle=True)
+    training_data_loader = DataLoader(dataset=train_set, batch_size=nn_config.getint('BatchSize'), shuffle=True, num_workers=6)
+    testing_data_loader = DataLoader(dataset=test_set, batch_size=nn_config.getint('BatchSize'), shuffle=True, num_workers=6)
 
     solver.build_models()
 
@@ -52,7 +52,9 @@ def main():
     try:
         solver.train(training_data_loader, testing_data_loader)
     except KeyboardInterrupt as e:
+        # if we want to save results
         solver.save_model()
+
         if solver.logger:
             solver.logger.finish()
 

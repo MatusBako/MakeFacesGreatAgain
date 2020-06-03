@@ -7,4 +7,5 @@ scipy
 torch
 torchvision
 torchsummary
+tqdm
 opencv-python

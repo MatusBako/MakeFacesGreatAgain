@@ -1,7 +1,8 @@
 from math import log2, floor
 from torch import nn, cat, add, Tensor
-from  torch.nn import init, Upsample, Conv2d, ReLU
+from  torch.nn import init, Upsample, Conv2d, ReLU, Sequential
 from torch.nn.functional import interpolate
+
 
 class ScaleLayer(nn.Module):
     def __init__(self, init_value=1e-3):
@@ -11,9 +12,11 @@ class ScaleLayer(nn.Module):
     def forward(self, data):
         return data * self.scale
 
+
 class Net(nn.Module):
-    def __init__(self, upscale_factor, num_channels=3, base_channel=64, num_residuals=2):
+    def __init__(self, upscale_factor, num_channels=3, base_channel=256, num_residuals=32):
         super(Net, self).__init__()
+        assert log2(upscale_factor).is_integer(), "Upscale factor must be power of two"
 
         self.input_conv = nn.Conv2d(num_channels, base_channel, kernel_size=3, stride=1, padding=1)
 
@@ -24,10 +27,9 @@ class Net(nn.Module):
 
         self.mid_conv = nn.Conv2d(base_channel, base_channel, kernel_size=3, stride=1, padding=1)
 
-        upscale = []
-        for _ in range(int(log2(upscale_factor))):
-            upscale.append(PixelShuffleBlock(base_channel, base_channel, upscale_factor=2))
-        self.upscale_layers = nn.Sequential(*upscale)
+        upscale_layers = [PixelShuffleBlock(base_channel, base_channel, upscale_factor=2)
+                          for _ in range(int(log2(upscale_factor)))]
+        self.upscale_layers = Sequential(*upscale_layers)
 
         self.output_conv = nn.Conv2d(base_channel, num_channels, kernel_size=3, stride=1, padding=1)
 
@@ -40,7 +42,7 @@ class Net(nn.Module):
         residual = x
         x = self.residual_layers(x)
         x = self.mid_conv(x)
-        x = add(x, residual)
+        x += residual
         x = self.upscale_layers(x)
         x = self.output_conv(x)
         return x
@@ -58,7 +60,6 @@ class ResnetBlock(nn.Module):
         super(ResnetBlock, self).__init__()
         self.conv1 = nn.Conv2d(num_channel, num_channel, kernel, stride, padding)
         self.conv2 = nn.Conv2d(num_channel, num_channel, kernel, stride, padding)
-        self.weight = ScaleLayer()
         #self.bn = nn.BatchNorm2d(num_channel)
         self.activation = nn.ReLU(inplace=True)
 
@@ -68,8 +69,8 @@ class ResnetBlock(nn.Module):
         x = self.conv1(x)
         x = self.activation(x)
         #x = self.bn(self.conv2(x))
-        x = add(x, residual)
-        return self.weight(x)
+        x = x + residual
+        return x * 0.1
 
 
 class PixelShuffleBlock(nn.Module):

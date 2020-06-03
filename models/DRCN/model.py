@@ -1,14 +1,21 @@
+"""
+Implementation of DRCN architecture. The implementation is inspired by implementation
+from cited repository, but there were few changes made so it is usable with this module.
+
+
+Core functionality inspired by: https://github.com/togheppi/pytorch-super-resolution-model-collection/blob/master/drcn.py
+"""
+
 from torch import nn, cat, ones, sum, tensor, zeros
 
 
 class Net(nn.Module):
-    """
-    Inspired by: https://github.com/togheppi/pytorch-super-resolution-model-collection/blob/master/drcn.py
-    """
     def __init__(self, upscale_factor, base_channel=64):
+        # base_channel = 256
+
         super(Net, self).__init__()
         self.upscale_factor = upscale_factor
-        self.num_recursions = 8
+        self.num_recursions = 8 #16
         input_channel_cnt = 3
 
         # used for loss computation

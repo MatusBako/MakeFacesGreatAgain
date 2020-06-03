@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
-from matplotlib import pyplot as plt
 import numpy as np
+
+from collections import defaultdict
+from matplotlib import pyplot as plt
 from os import listdir
 from os.path import join, dirname, realpath, exists
 from sys import stderr
@@ -52,20 +54,19 @@ def transform_lines(lines: Dict[str, List]):
 
 
 def parse_log(log):
-    lines = {'iter': [], 'gen_train': [], 'gen_test': [], 'disc_train': [], 'disc_test': [], 'psnr': [],
-        'diff_psnr': [], 'identity_dist': [], 'pixel_loss': [], 'adv_loss': [], 'feature_loss': []}
+    lines = defaultdict(list)
     disc_lr_marks, gen_lr_marks = [], []
 
     with open(log, 'r') as file:
         for line in file:
             if line.startswith('DiscriminatorLearningRateAdapted'):
-                disc_lr_marks.append(lines['iter'][-1])
+                disc_lr_marks.append(lines['iter'][-1] if len(lines['iter']) else 0)
                 continue
             elif line.startswith('GeneratorLearningRateAdapted'):
-                gen_lr_marks.append(lines['iter'][-1])
+                gen_lr_marks.append(lines['iter'][-1] if len(lines['iter']) else 0)
                 continue
 
-            fields = line.split(" ")
+            fields = line.strip().split(" ")
 
             lines['iter'].append(int(fields[0].split(":")[-1]))
             lines['gen_train'].append(float(fields[1].split(":")[-1]))
@@ -74,10 +75,12 @@ def parse_log(log):
             lines['disc_test'].append(float(fields[4].split(":")[-1]))
             lines['psnr'].append(float(fields[5].split(":")[-1]))
             lines['diff_psnr'].append(float(fields[6].split(":")[-1]))
-            lines['identity_dist'].append(float(fields[7].split(":")[-1]))
-            lines['pixel_loss'].append(float(fields[8].split(":")[-1]))
-            lines['adv_loss'].append(float(fields[9].split(":")[-1]))
-            lines['feature_loss'].append(float(fields[10].split(":")[-1]))
+            lines['ssim'].append(float(fields[7].split(":")[-1]))
+            lines['identity_dist'].append(float(fields[8].split(":")[-1]))
+
+            for i in range(9, len(fields)):
+                k, v = fields[i].split(":")
+                lines[k].append(float(v))
     return lines, disc_lr_marks, gen_lr_marks
 
 
@@ -142,7 +145,7 @@ def main():
             if not exists(join("outputs", folder, "plot.png")) and "gan" in folder.lower():
                 folders.append(join("outputs", folder, "log.txt"))
     else:
-        folders = [dirname(args.log_path)]
+        folders = [args.log_path]
 
     for folder in folders:
         try:

@@ -18,7 +18,6 @@ class Generator(nn.Module):
 
         self.pre_upsample = nn.Sequential(
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
         )
 
         upsample = [UpsampleBLock(64, 2)] * upsample_block_num \
@@ -33,15 +32,17 @@ class Generator(nn.Module):
         return upsample
 
 
-# TODO: hourglass architecture
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, input_size=256):
         super(Discriminator, self).__init__()
-        self.net = nn.Sequential(
+        # fcc_in_params = 512 * input_size * input_size // 128
+
+        convs = [
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(64, 64, kernel_size=2, stride=2, padding=0),
+            # nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
 
@@ -49,7 +50,8 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(128, 128, kernel_size=2, stride=2, padding=0),
+            # nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
@@ -57,28 +59,39 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(256, 256, kernel_size=2, stride=2, padding=0),
+            # nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.LeakyReLU(0.2, inplace=True),
+        ]
 
-            #nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1),
-            #nn.BatchNorm2d(512),
-            #nn.LeakyReLU(0.2, inplace=True),
+        # - 3 for 3 downsamples, -1 for output to be 512x2x2
+        for i in range(int(log2(input_size)) - 3 - 1):
+            convs.extend([
+                # nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1),
+                nn.Conv2d(512, 512, kernel_size=2, stride=2, padding=0),
+                nn.BatchNorm2d(512),
+                nn.LeakyReLU(0.2, inplace=True),
+                ]
+            )
 
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(512, 1024, kernel_size=1),
+        self.convs = nn.Sequential(*convs)
+
+        self.fc = nn.Sequential(
+            nn.Linear(2048, 1024),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(1024, 1, kernel_size=1),
+            nn.Linear(1024, 1),
             nn.Sigmoid()
         )
 
     def forward(self, x):
-        batch_size = x.size(0)
-        return self.net(x).view(batch_size)
+        conv = self.convs(x)
+        map = self.fc(conv.view(x.size(0), -1))
+        return map.view(x.size(0))
 
 
 class ResidualBlock(nn.Module):
@@ -113,28 +126,32 @@ class UpsampleBLock(nn.Module):
 
 
 class FeatureExtractor(nn.Module):
-    def __init__(self, maxpool_idx=2, no_activation=False):
+    def __init__(self, maxpool_idx=2, no_pooling=True):
         """
         Used for computing perception loss (MSE over activations)
 
         :param maxpool_idx: either 1 or 4
-        :param no_activation: flag if last activation is included
+        :param no_pooling: flag if pooling layer is also included
         """
         super(FeatureExtractor, self).__init__()
 
-        children = list(vgg19(pretrained=True).children())[0]
+        children = vgg19(pretrained=True).features
         max_pool_indices = [index for index, layer in enumerate(children) if isinstance(layer, nn.MaxPool2d)]
 
         # get all layers up to chosen maxpool layer
         maxpool_idx = max_pool_indices[maxpool_idx]
-        layers = children[:maxpool_idx - int(no_activation)]
+
+        if no_pooling:
+            maxpool_idx -= 1
+
+        layers = children[:maxpool_idx]
         self.features = nn.Sequential(*layers).requires_grad_(False).eval()
 
         self.register_buffer("mean_val", tensor([0.485, 0.456, 0.406]).view((1, 3, 1, 1)))
         self.register_buffer("std_val", tensor([0.229, 0.224, 0.225]).view((1, 3, 1, 1)))
 
     def preprocess(self, x):
-        return (x - self.mean_val) * self.std_val
+        return (x - self.mean_val) / self.std_val
 
     def forward(self, x):
         return self.features(self.preprocess(x))

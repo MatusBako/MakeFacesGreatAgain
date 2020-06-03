@@ -17,7 +17,7 @@ class Senet50FeatureExtractor(Module):
             self.detections: Dict[str, Tuple] = pickle.load(f)
 
         self.extractor: Module = senet50_ft(weights_path).eval()
-        self.register_buffer("mean", tensor((131.0912, 103.8827, 91.4953)).view((3, 1, 1)))
+        self.register_buffer("mean", tensor((131.0912, 103.8827, 91.4953)).view((3, 1, 1)) / 255)
 
         self.descriptor_shape = 2048
 
@@ -58,6 +58,8 @@ class Senet50FeatureExtractor(Module):
         # img = img[:, t:b, l:r]
         # img = interpolate(img, scale_factor=factor)
 
+        img = interpolate(img.unsqueeze(0), (256, 256), mode="bicubic").squeeze(0)
+
         # return center crop of size 224
         img = self.center_crop(img, 224) - self.mean
 
@@ -66,8 +68,12 @@ class Senet50FeatureExtractor(Module):
 
         # img2 = img2[:, t:b, l:r]
         # img2 = interpolate(img2, scale_factor=factor)
+        img2 = interpolate(img2.unsqueeze(0), (256, 256), mode="bicubic").squeeze(0)
         img2 = self.center_crop(img2, 224) - self.mean
         return img, img2
+
+    def cos_sim(a, b):
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
     def forward(self, label, img: Tensor, img2: Optional[Tensor] = None) -> Optional[Union[Tensor, Tuple]]:
         """
@@ -107,7 +113,8 @@ class Senet50FeatureExtractor(Module):
             s = stack(inputs1)
             return self.extractor(s)[1].view((batch_size, self.descriptor_shape))
 
-        return self.extractor(stack(inputs1))[1], self.extractor(stack(inputs2))[1].detach().view((batch_size, self.descriptor_shape))
+        return self.extractor(stack(inputs1))[1].squeeze(3).squeeze(2), \
+               self.extractor(stack(inputs2))[1].squeeze(3).squeeze(2)
 
     @staticmethod
     def identity_dist(id1: Tensor, id2: Tensor):

@@ -6,7 +6,7 @@ import numpy as np
 from os import listdir
 from os.path import join, basename
 from PIL import Image
-from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop, RandomChoice
+from torchvision.transforms import Compose, RandomApply, Resize, ToTensor, CenterCrop, RandomChoice, RandomHorizontalFlip
 from torchvision.transforms.functional import crop
 
 from .transforms import JpegCompress, AddNoise, MotionBlur, DefocusBlur, ColorJitter
@@ -29,7 +29,7 @@ def get_img_size(path):
 
 def build_input_transform(rng, h, w, upscale_factor: int):
     return Compose([
-        # ColorJitter(rng),
+        ColorJitter(rng),
         RandomApply([AddNoise()], 0.3),
         RandomChoice([RandomApply([MotionBlur()], 0.3), RandomApply([DefocusBlur()], 0.3)]),
         RandomApply([JpegCompress()], 0.3),
@@ -40,13 +40,14 @@ def build_input_transform(rng, h, w, upscale_factor: int):
 
 def build_target_transform(rng):
     return Compose([
-        # ColorJitter(rng),
+        ColorJitter(rng),
         ToTensor(),
     ])
 
 
 class DatasetFFHQ(data.Dataset):
-    def __init__(self, image_dir, upscale_factor: int = 2, input_transform=None, target_transform=None, length=None):
+    def __init__(self, image_dir, upscale_factor: int = 2, input_transform=None, target_transform=None, length=None,
+                 ):
         super().__init__()
         self.image_filenames = sorted(listdir(image_dir))
         self.image_paths = [join(image_dir, x) for x in self.image_filenames]
@@ -60,14 +61,13 @@ class DatasetFFHQ(data.Dataset):
 
         seed = np.random.randint(0, 2 ** 32 - 1)
 
-        if input_transform:
+        if input_transform is not None and target_transform is not None:
             self.input_transform = input_transform
+            self.target_transform = target_transform
+        elif input_transform is not None or target_transform is not None:
+            assert False, "Both or neither input transformations must be set."
         else:
             self.input_transform = build_input_transform(np.random.RandomState(seed), self.w, self.h, upscale_factor)
-
-        if target_transform:
-            self.target_transform = target_transform
-        else:
             self.target_transform = build_target_transform(np.random.RandomState(seed))
 
     def __getitem__(self, index):

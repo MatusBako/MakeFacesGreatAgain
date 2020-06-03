@@ -33,15 +33,17 @@ class Generator(nn.Module):
         return upsample
 
 
-# TODO: hourglass architecture
 class Discriminator(nn.Module):
-    def __init__(self):
+    def __init__(self, input_size=256):
         super(Discriminator, self).__init__()
-        self.net = nn.Sequential(
+        # fcc_in_params = 512 * input_size * input_size // 128
+
+        convs = [
             nn.Conv2d(3, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(64, 64, kernel_size=4, stride=2),
+            # nn.Conv2d(64, 64, kernel_size=2, stride=2, padding=0),
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
             nn.LeakyReLU(0.2, inplace=True),
 
@@ -49,7 +51,8 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(128, 128, kernel_size=4, stride=2),
+            # nn.Conv2d(128, 128, kernel_size=2, stride=2, padding=0),
+            nn.Conv2d(128, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2, inplace=True),
 
@@ -57,27 +60,39 @@ class Discriminator(nn.Module):
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
-            nn.Conv2d(256, 256, kernel_size=4, stride=2),
+            # nn.Conv2d(256, 256, kernel_size=2, stride=2, padding=0),
+            nn.Conv2d(256, 256, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True),
 
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
             nn.BatchNorm2d(512),
             nn.LeakyReLU(0.2, inplace=True),
+        ]
 
-            nn.Conv2d(512, 512, kernel_size=4, stride=2),
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2, inplace=True),
+        # - 3 for 3 downsamples, -1 for output to be 512x2x2
+        for i in range(int(log2(input_size)) - 3 - 1):
+            convs.extend([
+                nn.Conv2d(512, 512, kernel_size=3, stride=2, padding=1),
+                # nn.Conv2d(512, 512, kernel_size=2, stride=2, padding=0),
+                nn.BatchNorm2d(512),
+                nn.LeakyReLU(0.2, inplace=True),
+                ]
+            )
 
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(512, 1024, kernel_size=1),
+        self.convs = nn.Sequential(*convs)
+
+        self.fc = nn.Sequential(
+            nn.Linear(2048, 1024),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(1024, 1, kernel_size=1),
+            nn.Linear(1024, 1),
+            nn.Sigmoid()
         )
 
     def forward(self, x):
-        batch_size = x.size(0)
-        return sigmoid(self.net(x).view(batch_size))
+        conv = self.convs(x)
+        map = self.fc(conv.view(x.size(0), -1))
+        return map.view(x.size(0))
 
 
 class ResidualBlock(nn.Module):
@@ -125,38 +140,34 @@ class UpsampleBLock(nn.Module):
         return x
 
 
-'''class FeatureExtractor(nn.Module):
-    def __init__(self, cnn, feature_layer=9):#18):
-        super(FeatureExtractor, self).__init__()
-        self.features = nn.Sequential(*list(cnn.features.children())[:feature_layer])
-
-    def forward(self, x):
-        return self.features(x)'''
-
-
 class FeatureExtractor(nn.Module):
-    def __init__(self, maxpool_idx=2, no_activation=True):
+    def __init__(self, maxpool_idx=2, skip_n_last_layers=2):
         """
         Used for computing perception loss (MSE over activations)
 
         :param maxpool_idx: either 1 or 4
-        :param no_activation: flag if last activation is included
+        :param skip_n_last_layers: useful for skipping maxpool and activation
         """
         super(FeatureExtractor, self).__init__()
 
-        children = list(vgg19(pretrained=True).children())[0]
+        children = vgg19(pretrained=True).features
         max_pool_indices = [index for index, layer in enumerate(children) if isinstance(layer, nn.MaxPool2d)]
 
         # get all layers up to chosen maxpool layer
         maxpool_idx = max_pool_indices[maxpool_idx]
-        layers = children[:maxpool_idx - int(no_activation)]
+
+        # skip maxpooling and activation
+        if skip_n_last_layers > 0:
+            maxpool_idx -= skip_n_last_layers
+
+        layers = children[:maxpool_idx]
         self.features = nn.Sequential(*layers).requires_grad_(False).eval()
 
         self.register_buffer("mean_val", tensor([0.485, 0.456, 0.406]).view((1, 3, 1, 1)))
         self.register_buffer("std_val", tensor([0.229, 0.224, 0.225]).view((1, 3, 1, 1)))
 
     def preprocess(self, x):
-        return (x - self.mean_val) * self.std_val
+        return (x - self.mean_val) / self.std_val
 
     def forward(self, x):
         return self.features(self.preprocess(x))

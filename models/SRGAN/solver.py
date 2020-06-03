@@ -8,37 +8,38 @@ from torch.nn import MSELoss, BCELoss
 from torchvision.transforms import Normalize
 
 from .model import Generator, Discriminator, FeatureExtractor
-
-try:
-    from ..abstract_gan_solver import AbstractGanSolver
-except ValueError:
-    # in case module above isn't in pythonpath
-    script = getframeinfo(currentframe()).filename
-    models_dir = dirname(dirname(abspath(script)))
-    path.append(models_dir)
-    from abstract_gan_solver import AbstractGanSolver
+from models.abstract_gan_solver import AbstractGanSolver
+Generator = None
 
 
 class Solver(AbstractGanSolver):
-    def __init__(self, cfg=None):
-        super().__init__(cfg)
+    def __init__(self, cfg, *args, **kwargs):
+        super().__init__(cfg, *args, **kwargs)
 
         nn_config = cfg['GAN']
         self.device = nn_config['Device']
 
-        self.mse_loss: MSELoss = MSELoss().to(nn_config['Device'])
-        self.bce_loss = BCELoss().to(nn_config['Device'])
+        model = nn_config['Generator'] if cfg is not None else self.discriminator_name
 
-        self.feature_extractor = FeatureExtractor().to(nn_config['Device'])
+        global Generator
+        try:
+            Generator = __import__("models." + model, fromlist=['Generator']).Generator
+        except AttributeError:
+            Generator = __import__("models." + model, fromlist=['Net']).Net
 
-        self.mean = tensor([0.485, 0.456, 0.406]).view((1, 3, 1, 1)).to(nn_config['Device'])
-        self.std = tensor([0.229, 0.224, 0.225]).view((1, 3, 1, 1)).to(nn_config['Device'])
-        self.normalizer = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        self.mse_loss: MSELoss = MSELoss().to(self.device)
+        self.bce_loss = BCELoss().to(self.device)
 
-        self.ones_const = ones(self.batch_size, device=nn_config['Device'], requires_grad=False)
-        self.zeros_const = zeros(self.batch_size, device=nn_config['Device'], requires_grad=False)
+        self.feature_extractor = FeatureExtractor().to(self.device)
 
-        self.eps = 1e-8
+        self.ones_const = ones(self.batch_size, device=self.device, requires_grad=False)
+        self.zeros_const = zeros(self.batch_size, device=self.device, requires_grad=False)
+
+        self.pixel_loss_param = nn_config.getfloat('PixelLossParam', fallback=0)
+        self.adversarial_loss_param = nn_config.getfloat('AdversarialLossParam', fallback=0)
+        self.feature_loss_param = nn_config.getfloat('FeatureLossParam', fallback=0)
+
+        self.zero = zeros(1).to(self.device)
 
     @property
     def discriminator_name(self):
@@ -60,20 +61,30 @@ class Solver(AbstractGanSolver):
         fake_response = self.discriminator(fake_img)
         real_response = self.discriminator(real_img)
 
-        return (self.bce_loss(fake_response, self.zeros_const) +
-                self.bce_loss(real_response, self.ones_const)) / 2
+        return self.bce_loss(fake_response, self.zeros_const) + self.bce_loss(real_response, self.ones_const)
         # return self.bce(response, self.d_loss_response)
 
     def compute_generator_loss(self, label, fake_img: tensor, real_img: tensor, precomputed=None, *args, **kwargs):
-        fake_response = self.discriminator(fake_img)
+        pixel_loss = self.pixel_loss_param * self.mse_loss(fake_img, real_img) if self.pixel_loss_param != 0. else self.zero
 
-        gen_adv_loss = self.bce_loss(fake_response, self.ones_const)
+        if self.adversarial_loss_param != 0:
+            fake_response = self.discriminator(fake_img)
+            gen_adv_loss = self.adversarial_loss_param * self.bce_loss(fake_response, self.ones_const)
+        else:
+            gen_adv_loss = self.zero
 
-        fake_features = self.feature_extractor(fake_img)
-        real_features = self.feature_extractor(real_img).detach()
-        feature_content_loss = 0.1 * self.mse_loss(fake_features, real_features)
+        if self.feature_loss_param != 0:
+            fake_features = self.feature_extractor(fake_img)
+            real_features = self.feature_extractor(real_img).detach()
+            feature_loss = self.feature_loss_param * self.mse_loss(fake_features, real_features)
+        else:
+            feature_loss = self.zero
+
+        components = {
+            "pixel_loss": pixel_loss.item(),
+            "adv_loss": gen_adv_loss.item(),
+            "feature_loss": feature_loss.item()
+        }
 
         # TODO: koeficienty
-        return gen_adv_loss + feature_content_loss, \
-               [0, gen_adv_loss.item(), feature_content_loss.item()], \
-               None
+        return pixel_loss + gen_adv_loss + feature_loss, components, None

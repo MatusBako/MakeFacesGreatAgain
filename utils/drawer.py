@@ -14,8 +14,10 @@ class Drawer:
     def save_images(self, data: np.array, result: np.array, target: np.array, label: str):
         img_count = result.data.shape[0]
 
+
         img_count = 16 if img_count >= 16 else img_count
-        img_count -= img_count % 4
+        if img_count > 4:
+            img_count -= img_count % 4
 
         height, width, _ = result[0].shape
         stacks = []
@@ -28,7 +30,16 @@ class Drawer:
                 to_stack.append(target[j] * 256)
 
             stacks.append(np.hstack(to_stack))
-        collage = np.vstack(stacks)
+
+        if not stacks:
+            for i in range(img_count):
+                stacks.append(data[i] * 256)
+                stacks.append(result[i] * 256)
+                stacks.append(target[i] * 256)
+
+            collage = np.hstack(stacks)
+        else:
+            collage = np.vstack(stacks)
 
         imwrite(self.output_folder + "/" + label + ".png", collage[:, :, ::-1])
 

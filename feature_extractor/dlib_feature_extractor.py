@@ -7,10 +7,10 @@ from typing import Optional, Union, Tuple
 
 
 class DlibFeatureExtractor:
-    def __init__(self, shape_predictor, excractor_path):
+    def __init__(self, shape_predictor, extractor_path):
         self.face_detector = dlib.get_frontal_face_detector()
         self.face_localizer = dlib.shape_predictor(shape_predictor)
-        self.extractor = dlib.face_recognition_model_v1(excractor_path)
+        self.extractor = dlib.face_recognition_model_v1(extractor_path)
 
     @staticmethod
     def _input_transform(img: Tensor):

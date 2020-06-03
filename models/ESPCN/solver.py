@@ -5,9 +5,9 @@ from models.abstract_cnn_solver import AbstractCnnSolver
 
 
 class Solver(AbstractCnnSolver):
-    def __init__(self, cfg=None):
-        super().__init__(cfg)
-        self.mse_loss = MSELoss()
+    def __init__(self, cfg, *args, **kwargs):
+        super().__init__(cfg, *args, **kwargs)
+        self.mse_loss = MSELoss().to(self.device)
 
     def compute_loss(self, label, output, target):
         pixel_loss = self.mse_loss(output, target)

@@ -1,3 +1,11 @@
+"""
+Implementation of CARN architecture. The implementation is inspired by implementation
+from cited repository, but there were few changes made so it is usable with this module. 
+
+
+Original source: https://github.com/nmhkahn/CARN-pytorch
+"""
+
 from math import log2, floor
 from torch import nn, cat, add, Tensor, eye
 from torch.nn import init, Upsample, Conv2d, ReLU, AvgPool2d, BatchNorm2d
